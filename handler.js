@@ -17,7 +17,17 @@ const getApiKey = async () => {
 
 // Main
 exports.handler = async (event) => {
-  const allowedOrigin = event.stageVariables?.allowedOrigin || "*"; // Fallback to * if not set
+  const allowedOrigin = event.stageVariables?.allowedOrigin;
+  if (!allowedOrigin) {
+    return {
+      statusCode: 500,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ error: "Missing stage variable: allowedOrigin" }),
+    };
+  }
+
   const headers = {
     "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
