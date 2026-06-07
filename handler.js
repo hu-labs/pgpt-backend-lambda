@@ -1,13 +1,13 @@
 const { default: axios } = require("axios");
-const AWS = require("aws-sdk");
+const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
 
 // OpenAI API Key retrieval from Secrets Manager
 const getApiKey = async () => {
   if (process.env.OPENAI_API_KEY)
     return process.env.OPENAI_API_KEY;  // Local key for local debug with SAM
 
-  const sm = new AWS.SecretsManager();
-  const secret = await sm.getSecretValue({ SecretId: process.env.OPENAI_SECRET_ID }).promise();
+  const sm = new SecretsManagerClient();
+  const secret = await sm.send(new GetSecretValueCommand({ SecretId: process.env.OPENAI_SECRET_ID }));
   const secretsObj = JSON.parse(secret.SecretString);
   if (typeof secretsObj === 'object' && secretsObj.OPENAI_API_KEY) {
     return secretsObj.OPENAI_API_KEY;
