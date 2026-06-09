@@ -30,9 +30,11 @@ dist-ssr
 # My own
 /docs/
 function.zip
+lambda.zip
 template.yaml
 template.old-local.yaml
 .aws-sam/
 
 event.json
 policies/
+package/

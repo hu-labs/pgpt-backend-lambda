@@ -2,7 +2,7 @@
   "name": "backend-serverless-repo",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "handler.js",
   "scripts": {
     "test": "node --test handler.test.js"
   },
@@ -11,10 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "aws-sdk": "^2.1692.0",
+    "@aws-sdk/client-secrets-manager": "^3.1063.0",
     "axios": "^1.17.0"
-  },
-  "devDependencies": {
-    "@aws-sdk/client-secrets-manager": "^3.1063.0"
   }
 }
