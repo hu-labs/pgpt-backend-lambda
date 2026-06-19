@@ -4,7 +4,7 @@ const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client
 // OpenAI API Key retrieval from Secrets Manager
 const getApiKey = async () => {
   if (process.env.OPENAI_API_KEY)
-    return process.env.OPENAI_API_KEY;  // Local key for local debug with SAM
+    return process.env.OPENAI_API_KEY;  // Local key for local debug with SAM 
 
   const sm = new SecretsManagerClient();
   const secret = await sm.send(new GetSecretValueCommand({ SecretId: process.env.OPENAI_SECRET_ID }));
