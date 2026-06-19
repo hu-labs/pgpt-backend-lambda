@@ -1,0 +1,102 @@
+name: Promote Preview Backend Stable Alias
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  promote-preview:
+    name: Promote Preview Lambda Stable Alias
+    runs-on: ubuntu-latest
+    environment: preview
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_LAMBDA_FUNCTION_NAME: ${{ vars.AWS_LAMBDA_FUNCTION_NAME }}
+      PROD_ALIAS: ${{ vars.PROD_ALIAS }}
+      PUBLIC_API_URL: ${{ vars.PUBLIC_API_URL }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ vars.AWS_BACKEND_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: backend-preview-promote
+
+      - name: Publish Lambda Version
+        id: publish
+        run: |
+          NEW_VERSION="$(
+            aws lambda publish-version \
+              --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+              --description "Preview promotion from ${GITHUB_SHA}" \
+              --query Version \
+              --output text
+          )"
+
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Published version: ${NEW_VERSION}"
+
+      - name: Move Stable Alias
+        run: |
+          aws lambda update-alias \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+            --name "${PROD_ALIAS}" \
+            --function-version "${{ steps.publish.outputs.new_version }}"
+
+      - name: Confirm Stable Alias
+        run: |
+          aws lambda get-alias \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+            --name "${PROD_ALIAS}" \
+            --query '{Alias:Name,FunctionVersion:FunctionVersion,Updated:RevisionId}' \
+            --output table
+
+      - name: Smoke Test Public Preview API
+        run: |
+          response="$(curl -sS -f -X POST "$PUBLIC_API_URL" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "threadId": "ci-preview-public-smoke-test-001",
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "Say '\''Hello test'\'' and nothing else."
+                }
+              ]
+            }')"
+
+          echo "$response" | node -e '
+            let data = "";
+            process.stdin.on("data", chunk => data += chunk);
+            process.stdin.on("end", () => {
+              const parsed = JSON.parse(data);
+              const content = parsed.assistant && parsed.assistant.content;
+
+              if (!content || !content.includes("Hello test")) {
+                console.error("Unexpected public smoke test response:", data);
+                process.exit(1);
+              }
+
+              console.log("Public smoke test passed:", content);
+            });
+          '
