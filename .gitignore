@@ -35,6 +35,9 @@ template.yaml
 template.old-local.yaml
 .aws-sam/
 
-event.json
+test-lambda.sh
+test_event.json
+test_response.json
+
 policies/
 package/
