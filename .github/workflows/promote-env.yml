@@ -1,0 +1,78 @@
+name: Promote Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "GitHub Environment to promote"
+        required: true
+        type: environment
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: Promote ${{ inputs.environment }} Stable Alias
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_LAMBDA_FUNCTION_NAME: ${{ vars.AWS_LAMBDA_FUNCTION_NAME }}
+      PROD_ALIAS: ${{ vars.PROD_ALIAS }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ vars.AWS_BACKEND_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: backend-promote-${{ github.run_id }}
+
+      - name: Publish Lambda Version
+        id: publish
+        run: |
+          NEW_VERSION="$(
+            aws lambda publish-version \
+              --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+              --description "${{ inputs.environment }} promotion from ${GITHUB_SHA}" \
+              --query Version \
+              --output text
+          )"
+
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Published version: ${NEW_VERSION}"
+
+      - name: Move Stable Alias
+        run: |
+          aws lambda update-alias \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+            --name "${PROD_ALIAS}" \
+            --function-version "${{ steps.publish.outputs.new_version }}"
+
+      - name: Confirm Stable Alias
+        run: |
+          aws lambda get-alias \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+            --name "${PROD_ALIAS}" \
+            --query '{
+              Alias:Name,
+              FunctionVersion:FunctionVersion,
+              RevisionId:RevisionId
+            }' \
+            --output table
+
+      - name: Smoke Test Public Stable API
+        env:
+          SMOKE_ENVIRONMENT: ${{ inputs.environment }}
+          SMOKE_TARGET: test
+          PUBLIC_API_URL: ${{ vars.PUBLIC_API_URL }}
+        run: ./scripts/smoke-test.sh

@@ -28,7 +28,8 @@ dist-ssr
 .env
 
 # My own
-/docs/
+docs/
+old/
 function.zip
 lambda.zip
 template.yaml
@@ -38,6 +39,8 @@ template.old-local.yaml
 test-lambda.sh
 test_event.json
 test_response.json
+scripts/setenv-preview.sh
+scripts/setenv-production.sh
 
 policies/
 package/
