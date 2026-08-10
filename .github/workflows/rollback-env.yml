@@ -1,0 +1,106 @@
+name: Rollback Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "GitHub Environment to roll back"
+        required: true
+        type: environment
+
+      target_version:
+        description: "Existing Lambda version for the stable alias, e.g. 3"
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub Environment to roll back"
+        required: true
+        type: string
+
+      target_version:
+        description: "Existing Lambda version for the stable alias"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Rollback ${{ inputs.environment }} Stable Alias
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_LAMBDA_FUNCTION_NAME: ${{ vars.AWS_LAMBDA_FUNCTION_NAME }}
+      PROD_ALIAS: ${{ vars.PROD_ALIAS }}
+      TARGET_VERSION: ${{ inputs.target_version }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ vars.AWS_BACKEND_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: backend-rollback-${{ github.run_id }}
+
+      - name: Show Current Stable Alias
+        run: |
+          aws lambda get-alias \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+            --name "${PROD_ALIAS}" \
+            --query '{
+              Alias:Name,
+              CurrentVersion:FunctionVersion,
+              Description:Description
+            }' \
+            --output table
+
+      - name: Verify Target Version Exists
+        run: |
+          aws lambda get-function \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}:${TARGET_VERSION}" \
+            --query '{
+              FunctionName:Configuration.FunctionName,
+              Version:Configuration.Version,
+              LastModified:Configuration.LastModified,
+              Runtime:Configuration.Runtime
+            }' \
+            --output table
+
+      - name: Move Stable Alias to Target Version
+        run: |
+          aws lambda update-alias \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+            --name "${PROD_ALIAS}" \
+            --function-version "${TARGET_VERSION}"
+
+      - name: Confirm Stable Alias
+        run: |
+          aws lambda get-alias \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+            --name "${PROD_ALIAS}" \
+            --query '{
+              Alias:Name,
+              FunctionVersion:FunctionVersion,
+              RevisionId:RevisionId
+            }' \
+            --output table
+
+      - name: Smoke Test Public Stable API
+        env:
+          SMOKE_ENVIRONMENT: ${{ inputs.environment }}
+          SMOKE_TARGET: test
+          PUBLIC_API_URL: ${{ vars.PUBLIC_API_URL }}
+        run: ./scripts/smoke-test.sh

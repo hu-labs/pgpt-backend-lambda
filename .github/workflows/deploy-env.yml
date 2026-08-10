@@ -1,0 +1,114 @@
+name: Deploy Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "GitHub Environment to deploy"
+        required: true
+        type: environment
+
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub Environment to deploy"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  deploy:
+    name: Deploy ${{ inputs.environment }} Lambda $LATEST
+    needs: test
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      NODE_VERSION: "22"
+      LAMBDA_ZIP: lambda.zip
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_LAMBDA_FUNCTION_NAME: ${{ vars.AWS_LAMBDA_FUNCTION_NAME }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Build Lambda Package
+        run: |
+          set -euo pipefail
+
+          rm -rf package "${LAMBDA_ZIP}"
+          mkdir package
+
+          rsync -a ./ package/ \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "coverage" \
+            --exclude "test" \
+            --exclude "tests" \
+            --exclude "*.test.js" \
+            --exclude "*.spec.js" \
+            --exclude "lambda.zip" \
+            --exclude "node_modules"
+
+          cd package
+          npm ci --omit=dev
+          zip -r "../${LAMBDA_ZIP}" .
+
+      - name: Upload Lambda Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.environment }}-backend-lambda-zip
+          path: ${{ env.LAMBDA_ZIP }}
+          retention-days: 7
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ vars.AWS_BACKEND_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: backend-deploy-${{ github.run_id }}
+
+      - name: Deploy Lambda Code to $LATEST
+        run: |
+          aws lambda update-function-code \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+            --zip-file "fileb://${LAMBDA_ZIP}" \
+            --no-publish
+
+          aws lambda wait function-updated \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}"
+
+          aws lambda get-function-configuration \
+            --function-name "${AWS_LAMBDA_FUNCTION_NAME}" \
+            --query '{
+              FunctionName:FunctionName,
+              Runtime:Runtime,
+              LastModified:LastModified,
+              Version:Version,
+              LastUpdateStatus:LastUpdateStatus
+            }' \
+            --output table
+
+      - name: Smoke Test Test-Stage API
+        env:
+          SMOKE_ENVIRONMENT: ${{ inputs.environment }}
+          SMOKE_TARGET: test
+          TEST_API_URL: ${{ vars.TEST_API_URL }}
+          TEST_API_KEY: ${{ secrets.TEST_API_KEY }}
+        run: ./scripts/smoke-test.sh
