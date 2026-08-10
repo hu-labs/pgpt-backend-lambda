@@ -55,16 +55,11 @@ jobs:
           rm -rf package "${LAMBDA_ZIP}"
           mkdir package
 
-          rsync -a ./ package/ \
-            --exclude ".git" \
-            --exclude ".github" \
-            --exclude "coverage" \
-            --exclude "test" \
-            --exclude "tests" \
-            --exclude "*.test.js" \
-            --exclude "*.spec.js" \
-            --exclude "lambda.zip" \
-            --exclude "node_modules"
+          cp \
+            handler.js \
+            package.json \
+            package-lock.json \
+            package/
 
           cd package
           npm ci --omit=dev
