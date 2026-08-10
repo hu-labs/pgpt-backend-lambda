@@ -1,0 +1,25 @@
+name: Environment Secret Probe
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    environment: preview
+
+    steps:
+      - name: Check TEST_API_KEY
+        env:
+          TEST_API_KEY: ${{ secrets.TEST_API_KEY }}
+        run: |
+          if [[ -n "${TEST_API_KEY:-}" ]]; then
+            echo "TEST_API_KEY is available."
+          else
+            echo "TEST_API_KEY is NOT available."
+            exit 1
+          fi
