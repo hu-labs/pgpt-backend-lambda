@@ -1,0 +1,11 @@
+name: Test Key Probe Caller
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  probe:
+    uses: ./.github/workflows/diagnose-key.yml
+    with:
+      environment: preview

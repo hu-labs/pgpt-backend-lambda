@@ -1,16 +1,16 @@
-name: Environment Secret Probe
+name: Environment Secret Probe (call)
 
 on:
-  pull_request:
-    branches: [ main ]
-
-permissions:
-  contents: read
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    environment: preview
+    environment: ${{ inputs.environment }}
 
     steps:
       - name: Check TEST_API_KEY
@@ -23,3 +23,4 @@ jobs:
             echo "TEST_API_KEY is NOT available."
             exit 1
           fi
+          
