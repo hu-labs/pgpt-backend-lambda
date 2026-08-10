@@ -73,6 +73,6 @@ jobs:
       - name: Smoke Test Public Stable API
         env:
           SMOKE_ENVIRONMENT: ${{ inputs.environment }}
-          SMOKE_TARGET: test
+          SMOKE_TARGET: public
           PUBLIC_API_URL: ${{ vars.PUBLIC_API_URL }}
         run: ./scripts/smoke-test.sh
