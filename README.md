@@ -10,16 +10,15 @@ Designed to serve the frontend , from pgpt-frontend repo.
 
 - **AWS Lambda** for serverless compute
 - **API Gateway** for the REST API interface
-- **Node.js** runtime
-- **Axios** for HTTP client interfacing the OpenAI API
+- **Node.js 24** runtime using native ES modules and `fetch`
 - **AWS Secrets Manager** for security
 
 ## Testing
 
-A pre-deployment test can be run manually with:
+A complete pre-deployment check can be run manually with:
 
 ```bash
-npm test
+npm run check
 ```
 
-But it is intended for GH Actions which couples it with the post-deployment smoke test.
+This verifies formatting, lint rules, and unit tests. GitHub Actions runs the same check before deployment and follows deployment with a smoke test.

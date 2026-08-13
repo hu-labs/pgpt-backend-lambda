@@ -1,8 +1,8 @@
 {
   "name": "backend-serverless-repo",
   "version": "1.0.0",
+  "private": true,
   "description": "",
-  "main": "handler.js",
   "scripts": {
     "test": "node --test",
     "test:watch": "node --test --watch",
@@ -15,10 +15,12 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "dependencies": {
-    "@aws-sdk/client-secrets-manager": "^3.1063.0",
-    "axios": "^1.17.0"
+    "@aws-sdk/client-secrets-manager": "^3.1063.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

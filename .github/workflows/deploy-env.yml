@@ -33,7 +33,7 @@ jobs:
       contents: read
 
     env:
-      NODE_VERSION: "22"
+      NODE_VERSION: "24"
       LAMBDA_ZIP: lambda.zip
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_LAMBDA_FUNCTION_NAME: ${{ vars.AWS_LAMBDA_FUNCTION_NAME }}
