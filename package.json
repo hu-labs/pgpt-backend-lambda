@@ -4,7 +4,13 @@
   "description": "",
   "main": "handler.js",
   "scripts": {
-    "test": "node --test handler.test.js"
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run format:check && npm run lint && npm test"
   },
   "keywords": [],
   "author": "",
@@ -13,5 +19,12 @@
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.1063.0",
     "axios": "^1.17.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.8.1",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.11.0",
+    "prettier": "^3.9.6"
   }
 }
