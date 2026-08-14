@@ -1,22 +1,30 @@
-const { default: axios } = require("axios");
-const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
+import {
+  GetSecretValueCommand,
+  SecretsManagerClient,
+} from "@aws-sdk/client-secrets-manager";
+
+const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_TIMEOUT_MS = 19_500;
+const secretsManager = new SecretsManagerClient();
 
 // OpenAI API Key retrieval from Secrets Manager
 const getApiKey = async () => {
-  if (process.env.OPENAI_API_KEY)
-    return process.env.OPENAI_API_KEY;  // Local key for local debug with SAM 
+  if (process.env.OPENAI_API_KEY) {
+    return process.env.OPENAI_API_KEY;
+  }
 
-  const sm = new SecretsManagerClient();
-  const secret = await sm.send(new GetSecretValueCommand({ SecretId: process.env.OPENAI_SECRET_ID }));
+  const secret = await secretsManager.send(
+    new GetSecretValueCommand({ SecretId: process.env.OPENAI_SECRET_ID }),
+  );
   const secretsObj = JSON.parse(secret.SecretString);
-  if (typeof secretsObj === 'object' && secretsObj.OPENAI_API_KEY) {
+  if (typeof secretsObj === "object" && secretsObj.OPENAI_API_KEY) {
     return secretsObj.OPENAI_API_KEY;
   }
   throw new Error("Invalid secret format: OPENAI_API_KEY not found");
 };
 
 // Main
-exports.handler = async (event) => {
+export const handler = async (event) => {
   const allowedOrigin = event.stageVariables?.allowedOrigin;
   if (!allowedOrigin) {
     return {
@@ -34,14 +42,12 @@ exports.handler = async (event) => {
     "Access-Control-Allow-Headers": "Content-Type,X-Api-Key",
     //"Access-Control-Allow-Credentials": true,
   };
-  console.log("allowedOrigin:", allowedOrigin);
-
   try {
-    console.log("Raw event received:", JSON.stringify(event, null, 2));
-
     if (!event.body) {
       return {
-        statusCode: 400, headers, body: JSON.stringify({ error: "Missing request body" })
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: "Missing request body" }),
       };
     }
 
@@ -49,57 +55,115 @@ exports.handler = async (event) => {
     try {
       body = JSON.parse(event.body);
     } catch (parseErr) {
-      console.error("Error parsing event body:", parseErr.message, parseErr.stack);
-      return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON payload" }) };
+      console.error("Unable to parse request body", {
+        error: parseErr.message,
+      });
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: "Invalid JSON payload" }),
+      };
     }
 
-    //console.log("Parsed body:", body);
-
-    const { threadId, messages, model = "gpt-4o-mini", temperature = 0.3 } = body;
+    const {
+      threadId,
+      messages,
+      model = "gpt-4o-mini",
+      temperature = 0.3,
+    } = body;
     if (!threadId) {
-      console.error("Validation error: Missing threadId in request body");
-      return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing threadId" }) };
+      console.warn("Request validation failed: missing threadId");
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: "Missing threadId" }),
+      };
     }
     if (!Array.isArray(messages)) {
-      console.error("Validation error: 'messages' must be an array");
-      return { statusCode: 400, headers, body: JSON.stringify({ error: "messages must be an array" }) };
+      console.warn("Request validation failed: messages must be an array", {
+        threadId,
+      });
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: "messages must be an array" }),
+      };
     }
     if (messages.length === 0) {
-      console.error("Validation error: 'messages' array cannot be empty");
-      return { statusCode: 400, headers, body: JSON.stringify({ error: "messages array cannot be empty" }) };
+      console.warn("Request validation failed: messages cannot be empty", {
+        threadId,
+      });
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: "messages array cannot be empty" }),
+      };
     }
-    console.log("No errors on the parse + format.");
+    console.info("Valid request received", {
+      threadId,
+      model,
+      messageCount: messages.length,
+    });
 
-    // Retrieve API Key
     const apiKey = await getApiKey().catch((err) => {
-      console.error("Error retrieving API key from Secrets Manager:", err.message, err.stack);
+      console.error("Unable to retrieve OpenAI API key", {
+        threadId,
+        error: err.message,
+      });
       throw err;
     });
 
-    const chatMessages = messages.map(m => ({ role: m.role, content: m.content }));
+    const chatMessages = messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
 
-    // Query OpenAI API
-    let resp;
+    let data;
     try {
-      resp = await axios.post("https://api.openai.com/v1/chat/completions", {
-        model, messages: chatMessages, temperature,
-      }, {
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        timeout: 19500,
+      const response = await fetch(OPENAI_API_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: chatMessages,
+          temperature,
+        }),
+        signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        throw new Error(`OpenAI API responded with status ${response.status}`);
+      }
+
+      data = await response.json();
+      console.info("OpenAI response received", {
+        threadId,
+        statusCode: response.status,
       });
     } catch (err) {
-      console.error("Error during OpenAI API call:", err.message, err.stack);
-      return { statusCode: 500, headers, body: JSON.stringify({ error: "Error calling OpenAI API" }) };
+      console.error("OpenAI request failed", { threadId, error: err.message });
+      return {
+        statusCode: 500,
+        headers,
+        body: JSON.stringify({ error: "Error calling OpenAI API" }),
+      };
     }
 
-    const data = resp.data;
-    // Log the backend response
-    console.log("OpenAI API Response:", JSON.stringify(data, null, 2));
-
-    const assistant = data.choices?.[0]?.message || { role: "assistant", content: "No response" };
+    const assistant = data.choices?.[0]?.message || {
+      role: "assistant",
+      content: "No response",
+    };
+    console.info("Successful response issued", { threadId, statusCode: 200 });
     return { statusCode: 200, headers, body: JSON.stringify({ assistant }) };
   } catch (err) {
-    console.error("Unexpected server error:", err.message, err.stack);
-    return { statusCode: 500, headers, body: JSON.stringify({ error: "Server error" }) };
+    console.error("Unexpected server error", { error: err.message });
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({ error: "Server error" }),
+    };
   }
 };
