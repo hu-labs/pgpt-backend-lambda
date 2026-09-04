@@ -73,9 +73,12 @@ response="$(
     curl --silent --show-error --fail-with-body \
         -X POST "$smoke_url" \
         "${headers[@]}" \
+        -H "Accept: text/event-stream" \
         --data "$payload"
 )"
 
+# Response is an SSE stream (event: delta/done/error, data: {...} - see handler.js),
+# not a single JSON body: assemble the "delta" chunks and require a clean "done".
 printf '%s' "$response" | node -e '
 let data = "";
 
@@ -84,19 +87,35 @@ process.stdin.on("data", chunk => {
 });
 
 process.stdin.on("end", () => {
-    let parsed;
+    const events = data
+        .split("\n\n")
+        .filter(block => block.startsWith("event:"))
+        .map(block => {
+            const [eventLine, dataLine] = block.split("\n");
+            return {
+                event: eventLine.slice("event:".length).trim(),
+                data: JSON.parse(dataLine.slice("data:".length).trim()),
+            };
+        });
 
-    try {
-        parsed = JSON.parse(data);
-    } catch {
-        console.error("Smoke-test response was not valid JSON:", data);
+    const errorEvent = events.find(e => e.event === "error");
+    if (errorEvent) {
+        console.error("Backend reported an error event:", errorEvent.data.message);
         process.exit(1);
     }
 
-    const content = parsed.assistant?.content;
+    const content = events
+        .filter(e => e.event === "delta")
+        .map(e => e.data.content)
+        .join("");
 
-    if (!content || !content.includes("Hello test")) {
-        console.error("Unexpected smoke-test response:", data);
+    if (!content.includes("Hello test")) {
+        console.error("Unexpected smoke-test response content:", data);
+        process.exit(1);
+    }
+
+    if (!events.some(e => e.event === "done")) {
+        console.error("Stream ended without a done event (possible timeout/truncation):", data);
         process.exit(1);
     }
 

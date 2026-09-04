@@ -36,6 +36,7 @@ lambda.zip
 template.yaml
 template.old-local.yaml
 .aws-sam/
+AGENTS.md
 
 test-lambda.sh
 test_event.json
