@@ -48,21 +48,17 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
-      - name: Build Lambda Package
+      - name: Install Dependencies
+        run: npm ci --omit=dev
+
+      - name: Build Lambda
+        run: npm run build
+
+      - name: Package Lambda
         run: |
           set -euo pipefail
-
           rm -rf package "${LAMBDA_ZIP}"
-          mkdir package
-
-          cp \
-            handler.js \
-            package.json \
-            package-lock.json \
-            package/
-
-          cd package
-          npm ci --omit=dev
+          cd dist
           zip -r "../${LAMBDA_ZIP}" .
 
       - name: Upload Lambda Artifact
