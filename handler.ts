@@ -2,6 +2,34 @@ import {
   GetSecretValueCommand,
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
+import type { Context } from "aws-lambda";
+
+interface RequestEvent {
+  body?: string | null;
+  stageVariables?: Record<string, string | undefined> | null;
+}
+
+interface ChatMessage {
+  role: string;
+  content: string;
+}
+
+interface RequestBody {
+  threadId?: string;
+  messages?: ChatMessage[];
+  model?: string;
+  temperature?: number;
+}
+
+interface OpenAiChunk {
+  choices?: Array<{
+    delta?: {
+      content?: string;
+    };
+  }>;
+}
+
+type SseData = Record<string, unknown>;
 
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
 // Leaves time to flush a clean "error" event before AWS hard-kills the Lambda.
@@ -12,7 +40,7 @@ const HEARTBEAT_INTERVAL_MS = 20_000;
 const secretsManager = new SecretsManagerClient();
 
 // OpenAI API Key retrieval from Secrets Manager
-const getApiKey = async () => {
+const getApiKey = async (): Promise<string> => {
   if (process.env.OPENAI_API_KEY) {
     return process.env.OPENAI_API_KEY;
   }
@@ -20,8 +48,17 @@ const getApiKey = async () => {
   const secret = await secretsManager.send(
     new GetSecretValueCommand({ SecretId: process.env.OPENAI_SECRET_ID }),
   );
-  const secretsObj = JSON.parse(secret.SecretString);
-  if (typeof secretsObj === "object" && secretsObj.OPENAI_API_KEY) {
+  if (!secret.SecretString) {
+    throw new Error("Invalid secret format: SecretString not found");
+  }
+
+  const secretsObj: unknown = JSON.parse(secret.SecretString);
+  if (
+    typeof secretsObj === "object" &&
+    secretsObj !== null &&
+    "OPENAI_API_KEY" in secretsObj &&
+    typeof secretsObj.OPENAI_API_KEY === "string"
+  ) {
     return secretsObj.OPENAI_API_KEY;
   }
   throw new Error("Invalid secret format: OPENAI_API_KEY not found");
@@ -36,11 +73,13 @@ const getApiKey = async () => {
   If the stream ends without a "done" or "error" event, the client treats that itself as a
   timeout/dropped-connection signal.
 */
-const sseEvent = (event, data) =>
+const sseEvent = (event: string, data: SseData): string =>
   `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
 // Parses OpenAI's own SSE stream, yielding delta text chunks; returns on [DONE].
-async function* readOpenAiDeltas(body) {
+async function* readOpenAiDeltas(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -60,9 +99,9 @@ async function* readOpenAiDeltas(body) {
         const payload = line.slice(5).trim();
         if (payload === "[DONE]") return;
 
-        let parsed;
+        let parsed: OpenAiChunk;
         try {
-          parsed = JSON.parse(payload);
+          parsed = JSON.parse(payload) as OpenAiChunk;
         } catch {
           continue; // ignore malformed/partial lines
         }
@@ -75,7 +114,7 @@ async function* readOpenAiDeltas(body) {
 
 // Main
 export const handler = awslambda.streamifyResponse(
-  async (event, responseStream, context) => {
+  async (event: RequestEvent, responseStream, context: Context) => {
     const allowedOrigin = event.stageVariables?.allowedOrigin;
     if (!allowedOrigin) {
       responseStream = awslambda.HttpResponseStream.from(responseStream, {
@@ -96,7 +135,7 @@ export const handler = awslambda.streamifyResponse(
     };
 
     // Only safe to call before the streaming success response has been committed below.
-    const fail = (statusCode, errorBody) => {
+    const fail = (statusCode: number, errorBody: SseData): void => {
       responseStream = awslambda.HttpResponseStream.from(responseStream, {
         statusCode,
         headers: { ...headers, "Content-Type": "application/json" },
@@ -110,12 +149,13 @@ export const handler = awslambda.streamifyResponse(
         return;
       }
 
-      let body;
+      let body: RequestBody;
       try {
-        body = JSON.parse(event.body);
+        body = JSON.parse(event.body) as RequestBody;
       } catch (parseErr) {
         console.error("Unable to parse request body", {
-          error: parseErr.message,
+          error:
+            parseErr instanceof Error ? parseErr.message : String(parseErr),
         });
         fail(400, { error: "Invalid JSON payload" });
         return;
@@ -155,7 +195,7 @@ export const handler = awslambda.streamifyResponse(
       const apiKey = await getApiKey().catch((err) => {
         console.error("Unable to retrieve OpenAI API key", {
           threadId,
-          error: err.message,
+          error: err instanceof Error ? err.message : String(err),
         });
         throw err;
       });
@@ -175,7 +215,7 @@ export const handler = awslambda.streamifyResponse(
         },
       });
 
-      let heartbeat;
+      let heartbeat: NodeJS.Timeout | undefined;
       try {
         responseStream.write(": ping\n\n"); // flush headers to the client immediately
         heartbeat = setInterval(
@@ -209,6 +249,10 @@ export const handler = awslambda.streamifyResponse(
           );
         }
 
+        if (!response.body) {
+          throw new Error("OpenAI API response did not include a body");
+        }
+
         for await (const delta of readOpenAiDeltas(response.body)) {
           responseStream.write(sseEvent("delta", { content: delta }));
         }
@@ -217,10 +261,11 @@ export const handler = awslambda.streamifyResponse(
         responseStream.write(sseEvent("done", {}));
       } catch (err) {
         const timedOut =
-          err.name === "TimeoutError" || err.name === "AbortError";
+          err instanceof Error &&
+          (err.name === "TimeoutError" || err.name === "AbortError");
         console.error("OpenAI streaming failed", {
           threadId,
-          error: err.message,
+          error: err instanceof Error ? err.message : String(err),
         });
         responseStream.write(
           sseEvent("error", {
@@ -234,7 +279,9 @@ export const handler = awslambda.streamifyResponse(
         responseStream.end();
       }
     } catch (err) {
-      console.error("Unexpected server error", { error: err.message });
+      console.error("Unexpected server error", {
+        error: err instanceof Error ? err.message : String(err),
+      });
       fail(500, { error: "Server error" });
     }
   },
