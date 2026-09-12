@@ -5,7 +5,7 @@
   "description": "",
   "scripts": {
     "prebuild": "rm -rf dist",
-    "build": "esbuild handler.ts --bundle --platform=node --target=node24 --format=esm --sourcemap --outfile=dist/handler.mjs",
+    "build": "esbuild handler.ts --bundle --platform=node --target=node24 --format=cjs --sourcemap --outfile=dist/handler.cjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -49,7 +49,7 @@ jobs:
           cache: npm
 
       - name: Install Dependencies
-        run: npm ci --omit=dev
+        run: npm ci
 
       - name: Build Lambda
         run: npm run build
