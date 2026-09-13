@@ -32,6 +32,9 @@ interface OpenAiChunk {
 type SseData = Record<string, unknown>;
 
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_MODEL = "gpt-4o-mini";
+const OPENAI_TEMPERATURE = 0.7;
+const OPENAI_EFFORT = "low";
 // Leaves time to flush a clean "error" event before AWS hard-kills the Lambda.
 const TIMEOUT_SAFETY_MARGIN_MS = 10_000;
 const MIN_OPENAI_TIMEOUT_MS = 5_000;
@@ -164,8 +167,8 @@ export const handler = awslambda.streamifyResponse(
       const {
         threadId,
         messages,
-        model = "gpt-4o-mini",
-        temperature = 0.3,
+        model = OPENAI_MODEL,
+        temperature = OPENAI_TEMPERATURE,
       } = body;
       if (!threadId) {
         console.warn("Request validation failed: missing threadId");
