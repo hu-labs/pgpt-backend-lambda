@@ -21,17 +21,24 @@ interface RequestBody {
   temperature?: number;
 }
 
-interface OpenAiChunk {
-  choices?: Array<{
-    delta?: {
-      content?: string;
-    };
-  }>;
+interface OpenAiStreamEvent {
+  type?: string;
+  delta?: string;
+  message?: string;
+  response?: {
+    error?: { message?: string } | null;
+    incomplete_details?: { reason?: string } | null;
+  };
 }
 
 type SseData = Record<string, unknown>;
 
-const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_API_URL = "https://api.openai.com/v1/responses";
+const OPENAI_MODEL = "gpt-4o-mini";
+const OPENAI_TEMPERATURE = 0.7;
+// Reserved for `reasoning.effort` when the default model supports reasoning.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const OPENAI_EFFORT = "low";
 // Leaves time to flush a clean "error" event before AWS hard-kills the Lambda.
 const TIMEOUT_SAFETY_MARGIN_MS = 10_000;
 const MIN_OPENAI_TIMEOUT_MS = 5_000;
@@ -76,7 +83,7 @@ const getApiKey = async (): Promise<string> => {
 const sseEvent = (event: string, data: SseData): string =>
   `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
-// Parses OpenAI's own SSE stream, yielding delta text chunks; returns on [DONE].
+// Parses OpenAI's own SSE stream, yielding text deltas until the response completes.
 async function* readOpenAiDeltas(
   body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<string> {
@@ -86,7 +93,9 @@ async function* readOpenAiDeltas(
 
   while (true) {
     const { value, done } = await reader.read();
-    if (done) return;
+    if (done) {
+      throw new Error("OpenAI API stream ended before response.completed");
+    }
     buffer += decoder.decode(value, { stream: true });
 
     let boundary;
@@ -97,16 +106,29 @@ async function* readOpenAiDeltas(
       for (const line of rawEvent.split("\n")) {
         if (!line.startsWith("data:")) continue;
         const payload = line.slice(5).trim();
-        if (payload === "[DONE]") return;
 
-        let parsed: OpenAiChunk;
+        let parsed: OpenAiStreamEvent;
         try {
-          parsed = JSON.parse(payload) as OpenAiChunk;
+          parsed = JSON.parse(payload) as OpenAiStreamEvent;
         } catch {
           continue; // ignore malformed/partial lines
         }
-        const content = parsed.choices?.[0]?.delta?.content;
-        if (content) yield content;
+
+        if (parsed.type === "response.output_text.delta" && parsed.delta) {
+          yield parsed.delta;
+        } else if (parsed.type === "response.completed") {
+          return;
+        } else if (parsed.type === "response.failed") {
+          throw new Error(
+            parsed.response?.error?.message ?? "OpenAI response failed",
+          );
+        } else if (parsed.type === "response.incomplete") {
+          throw new Error(
+            `OpenAI response incomplete: ${parsed.response?.incomplete_details?.reason ?? "unknown reason"}`,
+          );
+        } else if (parsed.type === "error") {
+          throw new Error(parsed.message ?? "OpenAI stream error");
+        }
       }
     }
   }
@@ -164,8 +186,8 @@ export const handler = awslambda.streamifyResponse(
       const {
         threadId,
         messages,
-        model = "gpt-4o-mini",
-        temperature = 0.3,
+        model = OPENAI_MODEL,
+        temperature = OPENAI_TEMPERATURE,
       } = body;
       if (!threadId) {
         console.warn("Request validation failed: missing threadId");
@@ -236,8 +258,9 @@ export const handler = awslambda.streamifyResponse(
           },
           body: JSON.stringify({
             model,
-            messages: chatMessages,
+            input: chatMessages,
             temperature,
+            store: false,
             stream: true,
           }),
           signal: AbortSignal.timeout(budgetMs),

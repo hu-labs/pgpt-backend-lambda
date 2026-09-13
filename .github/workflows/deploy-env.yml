@@ -59,7 +59,7 @@ jobs:
           set -euo pipefail
           rm -rf package "${LAMBDA_ZIP}"
           cd dist
-          zip -r "../${LAMBDA_ZIP}" .
+          zip -r "../${LAMBDA_ZIP}" handler.cjs handler.cjs.map
 
       - name: Upload Lambda Artifact
         uses: actions/upload-artifact@v4
