@@ -237,8 +237,8 @@ test("streams delta/done events assembling the full reply across multiple reads"
       calls.push({ input, init });
       return new Response(
         fakeSseBody([
-          'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
-          'data: {"choices":[{"delta":{"content":"lo"}}]}\n\ndata: [DONE]\n\n',
+          'event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hel"}\n\n',
+          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"lo"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
         ]),
         { status: 200 },
       );
@@ -270,14 +270,15 @@ test("streams delta/done events assembling the full reply across multiple reads"
 
   assert.equal(calls.length, 1);
   const [{ input, init }] = calls;
-  assert.equal(input, "https://api.openai.com/v1/chat/completions");
+  assert.equal(input, "https://api.openai.com/v1/responses");
   if (typeof init?.body !== "string") {
     assert.fail("expected fetch body to be a string");
   }
   assert.deepEqual(JSON.parse(init.body) as unknown, {
     model: "gpt-4o-mini",
-    messages: [{ role: "user", content: "Hi" }],
-    temperature: 0.3,
+    input: [{ role: "user", content: "Hi" }],
+    temperature: 0.7,
+    store: false,
     stream: true,
   });
   assert.ok(init.signal instanceof AbortSignal);
@@ -315,6 +316,37 @@ test("emits an error event when the OpenAI request throws", async () => {
     vi.fn(async () => {
       throw new Error("mock OpenAI failure");
     }),
+  );
+  const stream = createMockStream();
+
+  await invokeHandler(
+    buildEvent(
+      JSON.stringify({
+        threadId: "thread-123",
+        messages: [{ role: "user", content: "Hi" }],
+      }),
+    ),
+    stream,
+  );
+
+  const events = parseSseEvents(stream.chunks.join(""));
+  assert.deepEqual(events, [
+    { event: "error", data: { message: "Error calling OpenAI API." } },
+  ]);
+});
+
+test("emits an error event when OpenAI streams a failed response", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(
+          fakeSseBody([
+            'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"message":"mock stream failure"}}}\n\n',
+          ]),
+          { status: 200 },
+        ),
+    ),
   );
   const stream = createMockStream();
 
@@ -400,7 +432,12 @@ test("writes heartbeat pings while waiting on a slow OpenAI response", async () 
 
   assert.ok(resolveFetch);
   resolveFetch(
-    new Response(fakeSseBody(["data: [DONE]\n\n"]), { status: 200 }),
+    new Response(
+      fakeSseBody([
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+      ]),
+      { status: 200 },
+    ),
   );
   await handlerPromise;
 
