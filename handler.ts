@@ -5,26 +5,16 @@ import {
 import type { Context } from "aws-lambda";
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText, type ModelMessage } from "ai";
+import { z } from "zod";
 
 interface RequestEvent {
   body?: string | null;
   stageVariables?: Record<string, string | undefined> | null;
 }
 
-interface ChatMessage {
-  role: string;
-  content: string;
-}
-
-interface RequestBody {
-  threadId?: string;
-  messages?: ChatMessage[];
-  model?: string;
-  temperature?: number;
-}
-
 type SseData = Record<string, unknown>;
 
+//===== OpenAI: Useful constants =====
 const OPENAI_MODEL = "gpt-4o-mini";
 const OPENAI_TEMPERATURE = 0.7;
 // Reserved for `reasoning.effort` when the default model supports reasoning.
@@ -35,31 +25,50 @@ const TIMEOUT_SAFETY_MARGIN_MS = 10_000;
 const MIN_OPENAI_TIMEOUT_MS = 5_000;
 // Must stay under CloudFront's 60s inter-chunk idle timeout (see terraform repo cloudfront.tf).
 const HEARTBEAT_INTERVAL_MS = 20_000;
+//====================================
+
+// For obtaining the OpenAI API key
 const secretsManager = new SecretsManagerClient();
+
+// Zod schemas for request and secret validation
+const requestSchema = z.object({
+  threadId: z.string().min(1),
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(["system", "developer", "user", "assistant"]),
+        content: z.string(),
+      }),
+    )
+    .min(1),
+  model: z.string().min(1).default(OPENAI_MODEL),
+  temperature: z.number().default(OPENAI_TEMPERATURE),
+});
+const secretSchema = z.object({ OPENAI_API_KEY: z.string() });
+
+// Convenience function to extract error message
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 // OpenAI API Key retrieval from Secrets Manager
 const getApiKey = async (): Promise<string> => {
+  // Check if API key is available in environment variables
   if (process.env.OPENAI_API_KEY) {
     return process.env.OPENAI_API_KEY;
   }
-
+  // Obtain it from AWS Secrets Manager
   const secret = await secretsManager.send(
     new GetSecretValueCommand({ SecretId: process.env.OPENAI_SECRET_ID }),
   );
   if (!secret.SecretString) {
     throw new Error("Invalid secret format: SecretString not found");
   }
-
-  const secretsObj: unknown = JSON.parse(secret.SecretString);
-  if (
-    typeof secretsObj === "object" &&
-    secretsObj !== null &&
-    "OPENAI_API_KEY" in secretsObj &&
-    typeof secretsObj.OPENAI_API_KEY === "string"
-  ) {
-    return secretsObj.OPENAI_API_KEY;
+  // Validate secret structure
+  const secretResult = secretSchema.safeParse(JSON.parse(secret.SecretString));
+  if (!secretResult.success) {
+    throw new Error("Invalid secret format: OPENAI_API_KEY not found");
   }
-  throw new Error("Invalid secret format: OPENAI_API_KEY not found");
+  return secretResult.data.OPENAI_API_KEY;
 };
 
 /*
@@ -112,56 +121,28 @@ export const handler = awslambda.streamifyResponse(
         return;
       }
 
-      let body: RequestBody;
+      let body: unknown;
       try {
-        body = JSON.parse(event.body) as RequestBody;
+        body = JSON.parse(event.body);
       } catch (parseErr) {
         console.error("Unable to parse request body", {
-          error:
-            parseErr instanceof Error ? parseErr.message : String(parseErr),
+          error: errorMessage(parseErr),
         });
         fail(400, { error: "Invalid JSON payload" });
         return;
       }
-
-      const {
-        threadId,
-        messages,
-        model = OPENAI_MODEL,
-        temperature = OPENAI_TEMPERATURE,
-      } = body;
-      if (!threadId) {
-        console.warn("Request validation failed: missing threadId");
-        fail(400, { error: "Missing threadId" });
+      // Validate request body structure
+      const result = requestSchema.safeParse(body);
+      if (!result.success) {
+        const issues = result.error.issues.map(({ path, message }) => ({
+          path,
+          message,
+        }));
+        console.warn("Request validation failed", { issues });
+        fail(400, { error: "Invalid request body", issues });
         return;
       }
-      if (!Array.isArray(messages)) {
-        console.warn("Request validation failed: messages must be an array", {
-          threadId,
-        });
-        fail(400, { error: "messages must be an array" });
-        return;
-      }
-      if (messages.length === 0) {
-        console.warn("Request validation failed: messages cannot be empty", {
-          threadId,
-        });
-        fail(400, { error: "messages array cannot be empty" });
-        return;
-      }
-      if (
-        messages.some(
-          (message) =>
-            !message ||
-            !["system", "developer", "user", "assistant"].includes(
-              message.role,
-            ) ||
-            typeof message.content !== "string",
-        )
-      ) {
-        fail(400, { error: "Invalid chat message" });
-        return;
-      }
+      const { threadId, messages, model, temperature } = result.data;
       console.info("Valid request received", {
         threadId,
         model,
@@ -171,20 +152,17 @@ export const handler = awslambda.streamifyResponse(
       const apiKey = await getApiKey().catch((err) => {
         console.error("Unable to retrieve OpenAI API key", {
           threadId,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage(err),
         });
         throw err;
       });
 
-      const chatMessages: ModelMessage[] = messages.map((message) => {
-        return {
-          role:
-            message.role === "developer"
-              ? "system"
-              : (message.role as "system" | "user" | "assistant"),
-          content: message.content,
-        };
-      });
+      const chatMessages: ModelMessage[] = messages.map(
+        ({ role, content }) => ({
+          role: role === "developer" ? "system" : role,
+          content,
+        }),
+      );
 
       // Acquire the OpenAI client with the retrieved API key
       const openai = createOpenAI({ apiKey });
@@ -250,7 +228,7 @@ export const handler = awslambda.streamifyResponse(
           (err.name === "TimeoutError" || err.name === "AbortError");
         console.error("OpenAI streaming failed", {
           threadId,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage(err),
         });
         responseStream.write(
           sseEvent("error", {
@@ -265,7 +243,7 @@ export const handler = awslambda.streamifyResponse(
       }
     } catch (err) {
       console.error("Unexpected server error", {
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMessage(err),
       });
       fail(500, { error: "Server error" });
     }

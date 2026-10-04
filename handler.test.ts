@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
+import * as ai from "ai";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { Context } from "aws-lambda";
 import { afterAll, afterEach, test, vi } from "vitest";
+
+// Expose configurable exports so individual tests can spy on the SDK boundary.
+vi.mock("ai", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("ai")>()),
+}));
 
 interface ResponseMetadata {
   statusCode: number;
@@ -174,60 +180,99 @@ test("returns 400 when request body is invalid JSON", async () => {
   });
 });
 
-test("returns 400 when threadId is missing", async () => {
-  const stream = createMockStream();
+const validBody = {
+  threadId: "thread-123",
+  messages: [{ role: "user", content: "Hi" }],
+};
 
+for (const [name, body, paths] of [
+  ["missing threadId", { messages: validBody.messages }, [["threadId"]]],
+  ["empty threadId", { ...validBody, threadId: "" }, [["threadId"]]],
+  ["numeric threadId", { ...validBody, threadId: 42 }, [["threadId"]]],
+  ["missing messages", { threadId: "thread-123" }, [["messages"]]],
+  ["non-array messages", { ...validBody, messages: "invalid" }, [["messages"]]],
+  ["empty messages", { ...validBody, messages: [] }, [["messages"]]],
+  [
+    "unsupported role",
+    { ...validBody, messages: [{ role: "tool", content: "Hi" }] },
+    [["messages", 0, "role"]],
+  ],
+  [
+    "non-text content",
+    { ...validBody, messages: [{ role: "user", content: 42 }] },
+    [["messages", 0, "content"]],
+  ],
+  ["null message", { ...validBody, messages: [null] }, [["messages", 0]]],
+  ["empty model", { ...validBody, model: "" }, [["model"]]],
+  ["numeric model", { ...validBody, model: 42 }, [["model"]]],
+  ["null model", { ...validBody, model: null }, [["model"]]],
+  [
+    "string temperature",
+    { ...validBody, temperature: "0.7" },
+    [["temperature"]],
+  ],
+  ["null temperature", { ...validBody, temperature: null }, [["temperature"]]],
+  ["null payload", null, [[]]],
+  ["array payload", [], [[]]],
+  ["string payload", "invalid", [[]]],
+  ["numeric payload", 42, [[]]],
+  ["boolean payload", true, [[]]],
+  [
+    "multiple invalid fields",
+    { ...validBody, threadId: "", messages: [] },
+    [["threadId"], ["messages"]],
+  ],
+] as const) {
+  test(`returns validation issues for ${name} without calling external services`, async () => {
+    const logMock = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const secretMock = vi.spyOn(SecretsManagerClient.prototype, "send");
+    vi.stubEnv("OPENAI_API_KEY", undefined);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const stream = createMockStream();
+    await invokeHandler(buildEvent(JSON.stringify(body)), stream);
+
+    assert.equal(stream.metadata?.statusCode, 400);
+    assert.equal(stream.metadata?.headers["Content-Type"], "application/json");
+    assert.equal(
+      stream.metadata?.headers["Access-Control-Allow-Origin"],
+      "https://example.com",
+    );
+    assert.equal(stream.ended, true);
+    const response = JSON.parse(stream.chunks.join(""));
+    assert.equal(response.error, "Invalid request body");
+    assert.deepEqual(
+      response.issues.map((issue: { path: unknown[] }) => issue.path),
+      paths,
+    );
+    for (const issue of response.issues) {
+      assert.deepEqual(Object.keys(issue).sort(), ["message", "path"]);
+      assert.equal(typeof issue.message, "string");
+      assert.ok(issue.message.length > 0);
+    }
+    assert.deepEqual(logMock.mock.calls, [
+      ["Request validation failed", { issues: response.issues }],
+    ]);
+    assert.equal(secretMock.mock.calls.length, 0);
+    assert.equal(fetchMock.mock.calls.length, 0);
+  });
+}
+
+test("returns a validation issue for non-finite temperature", async () => {
+  const stream = createMockStream();
   await invokeHandler(
     buildEvent(
-      JSON.stringify({
-        messages: [{ role: "user", content: "Hello" }],
-      }),
+      '{"threadId":"thread-123","messages":[{"role":"user","content":"Hi"}],"temperature":1e400}',
     ),
     stream,
   );
-
   assert.equal(stream.metadata?.statusCode, 400);
-  assert.deepEqual(JSON.parse(stream.chunks.join("")), {
-    error: "Missing threadId",
-  });
-});
-
-test("returns 400 when messages is not an array", async () => {
-  const stream = createMockStream();
-
-  await invokeHandler(
-    buildEvent(
-      JSON.stringify({
-        threadId: "thread-123",
-        messages: "not-an-array",
-      }),
-    ),
-    stream,
+  const response = JSON.parse(stream.chunks.join(""));
+  assert.equal(response.error, "Invalid request body");
+  assert.deepEqual(
+    response.issues.map((issue: { path: unknown[] }) => issue.path),
+    [["temperature"]],
   );
-
-  assert.equal(stream.metadata?.statusCode, 400);
-  assert.deepEqual(JSON.parse(stream.chunks.join("")), {
-    error: "messages must be an array",
-  });
-});
-
-test("returns 400 when messages is empty", async () => {
-  const stream = createMockStream();
-
-  await invokeHandler(
-    buildEvent(
-      JSON.stringify({
-        threadId: "thread-123",
-        messages: [],
-      }),
-    ),
-    stream,
-  );
-
-  assert.equal(stream.metadata?.statusCode, 400);
-  assert.deepEqual(JSON.parse(stream.chunks.join("")), {
-    error: "messages array cannot be empty",
-  });
 });
 
 test("streams delta/done events assembling the full reply across multiple reads", async () => {
@@ -533,18 +578,6 @@ test("does not retry upstream rate limits", async () => {
   assert.equal(fetchMock.mock.calls.length, 1);
 });
 
-test("returns 400 for unsupported message roles or non-text content", async () => {
-  for (const message of [
-    { role: "invalid", content: "Hi" },
-    { role: "user", content: 42 },
-    null,
-  ]) {
-    const stream = createMockStream();
-    await invokeHandler(validRequest({ messages: [message] }), stream);
-    assert.equal(stream.metadata?.statusCode, 400);
-  }
-});
-
 test("aborting an active request emits a timeout error and clears heartbeats", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const controller = new AbortController();
@@ -576,3 +609,92 @@ test("aborting an active request emits a timeout error and clears heartbeats", a
   assert.equal(stream.ended, true);
   assert.equal(vi.getTimerCount(), 0);
 });
+
+test("preserves supported roles and maps developer to system at the SDK boundary", async () => {
+  const messages = [
+    { role: "system", content: "System" },
+    { role: "developer", content: "Developer" },
+    { role: "user", content: "" },
+    { role: "assistant", content: "Reply" },
+  ];
+  const streamTextMock = vi.spyOn(ai, "streamText").mockReturnValue({
+    fullStream: (async function* () {
+      yield { type: "finish", finishReason: "stop" };
+    })(),
+  } as unknown as ReturnType<typeof ai.streamText>);
+  const stream = createMockStream();
+  await invokeHandler(validRequest({ messages }), stream);
+  assert.equal(streamTextMock.mock.calls.length, 1);
+  assert.deepEqual(
+    streamTextMock.mock.calls[0][0].messages,
+    messages.map(({ role, content }) => ({
+      role: role === "developer" ? "system" : role,
+      content,
+    })),
+  );
+  assert.equal(parseSseEvents(stream.chunks.join("")).at(-1)?.event, "done");
+});
+
+test("preserves whitespace and accepts unknown fields and unbounded finite temperature", async () => {
+  const fetchMock = vi.fn(
+    async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string);
+      assert.equal(body.model, " custom-model ");
+      assert.equal(body.temperature, 3);
+      assert.equal(body.extra, undefined);
+      return new Response(
+        fakeSseBody(['data: {"type":"response.completed","response":{}}\n\n']),
+      );
+    },
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const stream = createMockStream();
+  await invokeHandler(
+    validRequest({
+      threadId: " ",
+      model: " custom-model ",
+      temperature: 3,
+      extra: true,
+    }),
+    stream,
+  );
+  assert.equal(fetchMock.mock.calls.length, 1);
+  assert.equal(parseSseEvents(stream.chunks.join("")).at(-1)?.event, "done");
+});
+
+for (const secret of [
+  {},
+  { SecretString: "null" },
+  { SecretString: "{}" },
+  { SecretString: '{"OPENAI_API_KEY":42}' },
+  { SecretString: "{invalid}" },
+]) {
+  test(`returns a server error for invalid secret ${JSON.stringify(secret)}`, async () => {
+    vi.stubEnv("OPENAI_API_KEY", undefined);
+    vi.spyOn(SecretsManagerClient.prototype, "send").mockImplementation(
+      async () => secret,
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const logMock = vi.spyOn(console, "error").mockImplementation(() => {});
+    const stream = createMockStream();
+    await invokeHandler(validRequest(), stream);
+    assert.equal(stream.metadata?.statusCode, 500);
+    assert.deepEqual(JSON.parse(stream.chunks.join("")), {
+      error: "Server error",
+    });
+    assert.equal(stream.ended, true);
+    assert.equal(fetchMock.mock.calls.length, 0);
+    if (!secret.SecretString) {
+      assert.equal(
+        logMock.mock.calls[0]?.[1].error,
+        "Invalid secret format: SecretString not found",
+      );
+    } else if (secret.SecretString !== "{invalid}") {
+      assert.equal(
+        logMock.mock.calls[0]?.[1].error,
+        "Invalid secret format: OPENAI_API_KEY not found",
+      );
+    }
+  });
+}
