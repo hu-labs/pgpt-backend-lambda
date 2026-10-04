@@ -4,7 +4,7 @@ The backend for PromptGPT.
 
 A serverless REST API running on AWS Lambda, providing LLM response from OpenAI API.
 
-Designed to serve the frontend , from pgpt-frontend repo.
+Designed to serve the frontend, from pgpt-frontend repo.
 
 ## Technologies
 
@@ -12,6 +12,7 @@ Designed to serve the frontend , from pgpt-frontend repo.
 - **API Gateway** for the REST API interface
 - **Node.js 24** runtime using native ES modules and `fetch` (TypeScript)
 - **AWS Secrets Manager** for security
+- **AI SDK** for LLM integration
 
 ## Testing
 
