@@ -23,7 +23,9 @@
     "node": ">=24 <25"
   },
   "dependencies": {
-    "@aws-sdk/client-secrets-manager": "^3.1063.0"
+    "@ai-sdk/openai": "^4.0.83",
+    "@aws-sdk/client-secrets-manager": "^3.1063.0",
+    "ai": "^7.0.127"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
