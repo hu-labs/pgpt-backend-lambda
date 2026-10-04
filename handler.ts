@@ -3,6 +3,8 @@ import {
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
 import type { Context } from "aws-lambda";
+import { createOpenAI } from "@ai-sdk/openai";
+import { streamText, type ModelMessage } from "ai";
 
 interface RequestEvent {
   body?: string | null;
@@ -21,19 +23,8 @@ interface RequestBody {
   temperature?: number;
 }
 
-interface OpenAiStreamEvent {
-  type?: string;
-  delta?: string;
-  message?: string;
-  response?: {
-    error?: { message?: string } | null;
-    incomplete_details?: { reason?: string } | null;
-  };
-}
-
 type SseData = Record<string, unknown>;
 
-const OPENAI_API_URL = "https://api.openai.com/v1/responses";
 const OPENAI_MODEL = "gpt-4o-mini";
 const OPENAI_TEMPERATURE = 0.7;
 // Reserved for `reasoning.effort` when the default model supports reasoning.
@@ -83,57 +74,6 @@ const getApiKey = async (): Promise<string> => {
 const sseEvent = (event: string, data: SseData): string =>
   `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
-// Parses OpenAI's own SSE stream, yielding text deltas until the response completes.
-async function* readOpenAiDeltas(
-  body: ReadableStream<Uint8Array>,
-): AsyncGenerator<string> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) {
-      throw new Error("OpenAI API stream ended before response.completed");
-    }
-    buffer += decoder.decode(value, { stream: true });
-
-    let boundary;
-    while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-      const rawEvent = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-
-      for (const line of rawEvent.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-
-        let parsed: OpenAiStreamEvent;
-        try {
-          parsed = JSON.parse(payload) as OpenAiStreamEvent;
-        } catch {
-          continue; // ignore malformed/partial lines
-        }
-
-        if (parsed.type === "response.output_text.delta" && parsed.delta) {
-          yield parsed.delta;
-        } else if (parsed.type === "response.completed") {
-          return;
-        } else if (parsed.type === "response.failed") {
-          throw new Error(
-            parsed.response?.error?.message ?? "OpenAI response failed",
-          );
-        } else if (parsed.type === "response.incomplete") {
-          throw new Error(
-            `OpenAI response incomplete: ${parsed.response?.incomplete_details?.reason ?? "unknown reason"}`,
-          );
-        } else if (parsed.type === "error") {
-          throw new Error(parsed.message ?? "OpenAI stream error");
-        }
-      }
-    }
-  }
-}
-
 // Main
 export const handler = awslambda.streamifyResponse(
   async (event: RequestEvent, responseStream, context: Context) => {
@@ -156,6 +96,7 @@ export const handler = awslambda.streamifyResponse(
       //"Access-Control-Allow-Credentials": true,
     };
 
+    // fail function that is used to send error responses before streaming starts.
     // Only safe to call before the streaming success response has been committed below.
     const fail = (statusCode: number, errorBody: SseData): void => {
       responseStream = awslambda.HttpResponseStream.from(responseStream, {
@@ -208,6 +149,19 @@ export const handler = awslambda.streamifyResponse(
         fail(400, { error: "messages array cannot be empty" });
         return;
       }
+      if (
+        messages.some(
+          (message) =>
+            !message ||
+            !["system", "developer", "user", "assistant"].includes(
+              message.role,
+            ) ||
+            typeof message.content !== "string",
+        )
+      ) {
+        fail(400, { error: "Invalid chat message" });
+        return;
+      }
       console.info("Valid request received", {
         threadId,
         model,
@@ -222,10 +176,18 @@ export const handler = awslambda.streamifyResponse(
         throw err;
       });
 
-      const chatMessages = messages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      }));
+      const chatMessages: ModelMessage[] = messages.map((message) => {
+        return {
+          role:
+            message.role === "developer"
+              ? "system"
+              : (message.role as "system" | "user" | "assistant"),
+          content: message.content,
+        };
+      });
+
+      // Acquire the OpenAI client with the retrieved API key
+      const openai = createOpenAI({ apiKey });
 
       // Committed from here on: status/headers can no longer change, failures become SSE "error" events.
       responseStream = awslambda.HttpResponseStream.from(responseStream, {
@@ -250,34 +212,34 @@ export const handler = awslambda.streamifyResponse(
           MIN_OPENAI_TIMEOUT_MS,
         );
 
-        const response = await fetch(OPENAI_API_URL, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model,
-            input: chatMessages,
-            temperature,
-            store: false,
-            stream: true,
-          }),
-          signal: AbortSignal.timeout(budgetMs),
+        // Use streamText from AI SDK
+        const result = streamText({
+          model: openai.responses(model),
+          messages: chatMessages,
+          temperature,
+          providerOptions: { openai: { store: false } },
+          maxRetries: 0,
+          abortSignal: AbortSignal.timeout(budgetMs),
         });
 
-        if (!response.ok) {
-          throw new Error(
-            `OpenAI API responded with status ${response.status}`,
-          );
+        let completed = false;
+        for await (const part of result.fullStream) {
+          switch (part.type) {
+            case "text-delta":
+              responseStream.write(sseEvent("delta", { content: part.text }));
+              break;
+            case "error":
+              throw part.error;
+            case "abort":
+              throw new DOMException("AI request aborted", "AbortError");
+            case "finish":
+              // A dropped stream has reason "other"; length/filter limits are incomplete.
+              completed = part.finishReason === "stop";
+              break;
+          }
         }
-
-        if (!response.body) {
-          throw new Error("OpenAI API response did not include a body");
-        }
-
-        for await (const delta of readOpenAiDeltas(response.body)) {
-          responseStream.write(sseEvent("delta", { content: delta }));
+        if (!completed) {
+          throw new Error("AI response did not complete successfully");
         }
 
         console.info("Streamed response completed", { threadId });

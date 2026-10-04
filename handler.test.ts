@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { Context } from "aws-lambda";
 import { afterAll, afterEach, test, vi } from "vitest";
 
@@ -46,6 +47,8 @@ const { handler } = await import("./handler.js");
 const HEARTBEAT_INTERVAL_MS = 20_000;
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   globalThis.fetch = originalFetch;
@@ -237,8 +240,8 @@ test("streams delta/done events assembling the full reply across multiple reads"
       calls.push({ input, init });
       return new Response(
         fakeSseBody([
-          'event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hel"}\n\n',
-          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"lo"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+          'event: response.created\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg_1","delta":"Hel"}\n\n',
+          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg_1","delta":"lo"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
         ]),
         { status: 200 },
       );
@@ -276,7 +279,7 @@ test("streams delta/done events assembling the full reply across multiple reads"
   }
   assert.deepEqual(JSON.parse(init.body) as unknown, {
     model: "gpt-4o-mini",
-    input: [{ role: "user", content: "Hi" }],
+    input: [{ role: "user", content: [{ type: "input_text", text: "Hi" }] }],
     temperature: 0.7,
     store: false,
     stream: true,
@@ -342,7 +345,7 @@ test("emits an error event when OpenAI streams a failed response", async () => {
       async () =>
         new Response(
           fakeSseBody([
-            'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"message":"mock stream failure"}}}\n\n',
+            'event: response.failed\ndata: {"type":"response.failed","sequence_number":1,"response":{"error":{"message":"mock stream failure"}}}\n\n',
           ]),
           { status: 200 },
         ),
@@ -399,7 +402,7 @@ test("emits a timeout-specific error event when the request budget is exceeded",
 });
 
 test("writes heartbeat pings while waiting on a slow OpenAI response", async () => {
-  vi.useFakeTimers({ toFake: ["setInterval"] });
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   let resolveFetch: ((response: Response) => void) | undefined;
   vi.stubGlobal(
     "fetch",
@@ -423,9 +426,7 @@ test("writes heartbeat pings while waiting on a slow OpenAI response", async () 
   );
 
   // Let the handler run up to the pending fetch() call before advancing fake timers.
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  await vi.waitFor(() => assert.ok(resolveFetch));
 
   vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
   vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
@@ -441,9 +442,137 @@ test("writes heartbeat pings while waiting on a slow OpenAI response", async () 
   );
   await handlerPromise;
 
+  assert.equal(vi.getTimerCount(), 0);
   const pingCount = stream.chunks.filter((c) => c === ": ping\n\n").length;
   assert.ok(
     pingCount >= 2,
     `expected at least 2 heartbeat pings, got ${pingCount}`,
   );
+});
+
+const validRequest = (overrides: Record<string, unknown> = {}) =>
+  buildEvent(
+    JSON.stringify({
+      threadId: "thread-123",
+      messages: [{ role: "user", content: "Hi" }],
+      ...overrides,
+    }),
+  );
+
+for (const terminal of [
+  "",
+  'data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}\n\n',
+]) {
+  test(`rejects ${terminal ? "incomplete" : "prematurely ended"} streams without done`, async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            fakeSseBody([
+              'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n',
+              'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"Partial"}\n\n',
+              terminal,
+            ]),
+          ),
+      ),
+    );
+    const stream = createMockStream();
+    await invokeHandler(validRequest(), stream);
+    assert.deepEqual(
+      parseSseEvents(stream.chunks.join("")).map((e) => e.event),
+      ["delta", "error"],
+    );
+    assert.equal(stream.ended, true);
+    assert.equal(vi.getTimerCount(), 0);
+  });
+}
+
+test("uses the existing AWS secret key and honors model and temperature overrides", async () => {
+  vi.stubEnv("OPENAI_API_KEY", undefined);
+  vi.stubEnv("OPENAI_SECRET_ID", "existing-secret");
+  const secretMock = vi
+    .spyOn(SecretsManagerClient.prototype, "send")
+    .mockImplementation(async (command) => {
+      assert.deepEqual(command.input, { SecretId: "existing-secret" });
+      return {
+        SecretString: JSON.stringify({ OPENAI_API_KEY: "existing-secret-key" }),
+      };
+    });
+  const fetchMock = vi.fn(
+    async (_input: RequestInfo | URL, init?: RequestInit) => {
+      assert.equal(
+        new Headers(init?.headers).get("authorization"),
+        "Bearer existing-secret-key",
+      );
+      const body = JSON.parse(init?.body as string);
+      assert.equal(body.model, "gpt-4o");
+      assert.equal(body.temperature, 0.2);
+      assert.equal(body.store, false);
+      return new Response(
+        fakeSseBody(['data: {"type":"response.completed","response":{}}\n\n']),
+      );
+    },
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const stream = createMockStream();
+  await invokeHandler(
+    validRequest({ model: "gpt-4o", temperature: 0.2 }),
+    stream,
+  );
+  assert.equal(secretMock.mock.calls.length, 1);
+  assert.equal(fetchMock.mock.calls.length, 1);
+  assert.equal(parseSseEvents(stream.chunks.join("")).at(-1)?.event, "done");
+});
+
+test("does not retry upstream rate limits", async () => {
+  const fetchMock = vi.fn(async () => new Response(null, { status: 429 }));
+  vi.stubGlobal("fetch", fetchMock);
+  await invokeHandler(validRequest(), createMockStream());
+  assert.equal(fetchMock.mock.calls.length, 1);
+});
+
+test("returns 400 for unsupported message roles or non-text content", async () => {
+  for (const message of [
+    { role: "invalid", content: "Hi" },
+    { role: "user", content: 42 },
+    null,
+  ]) {
+    const stream = createMockStream();
+    await invokeHandler(validRequest({ messages: [message] }), stream);
+    assert.equal(stream.metadata?.statusCode, 400);
+  }
+});
+
+test("aborting an active request emits a timeout error and clears heartbeats", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const controller = new AbortController();
+  const timeout = vi
+    .spyOn(AbortSignal, "timeout")
+    .mockReturnValue(controller.signal);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+        controller.abort(new DOMException("Budget exceeded", "TimeoutError"));
+      });
+    }),
+  );
+  const stream = createMockStream();
+  await invokeHandler(validRequest(), stream);
+  assert.equal(timeout.mock.calls[0][0], 290_000);
+  assert.deepEqual(parseSseEvents(stream.chunks.join("")), [
+    {
+      event: "error",
+      data: { message: "Backend timed out while waiting for the AI response." },
+    },
+  ]);
+  assert.equal(stream.ended, true);
+  assert.equal(vi.getTimerCount(), 0);
 });
