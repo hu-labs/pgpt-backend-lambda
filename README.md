@@ -10,7 +10,7 @@ Designed to serve the frontend, from pgpt-frontend repo.
 
 - **AWS Lambda** for serverless compute
 - **API Gateway** for the REST API interface
-- **Node.js 24** runtime using native ES modules and `fetch` (TypeScript)
+- **Node.js 24** runtime
 - **AWS Secrets Manager** for security
 - **AI SDK** for LLM integration
 
