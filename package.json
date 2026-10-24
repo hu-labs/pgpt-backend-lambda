@@ -24,7 +24,9 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.83",
+    "@aws-sdk/client-dynamodb": "^3.1156.0",
     "@aws-sdk/client-secrets-manager": "^3.1063.0",
+    "@aws-sdk/lib-dynamodb": "^3.1156.0",
     "ai": "^7.0.127",
     "zod": "^4.6.5"
   },

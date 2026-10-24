@@ -108,6 +108,7 @@ export const handler = awslambda.streamifyResponse(
     // fail function that is used to send error responses before streaming starts.
     // Only safe to call before the streaming success response has been committed below.
     const fail = (statusCode: number, errorBody: SseData): void => {
+      // Register meta headers for SSE
       responseStream = awslambda.HttpResponseStream.from(responseStream, {
         statusCode,
         headers: { ...headers, "Content-Type": "application/json" },
