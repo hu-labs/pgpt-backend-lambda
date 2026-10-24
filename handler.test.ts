@@ -2,12 +2,40 @@ import assert from "node:assert/strict";
 import * as ai from "ai";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { Context } from "aws-lambda";
-import { afterAll, afterEach, test, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, test, vi } from "vitest";
 
 // Expose configurable exports so individual tests can spy on the SDK boundary.
 vi.mock("ai", async (importOriginal) => ({
   ...(await importOriginal<typeof import("ai")>()),
 }));
+
+import * as conversations from "./conversations.js";
+vi.mock("./conversations.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./conversations.js")>()),
+  deleteThread: vi.fn(),
+  requireThread: vi.fn(),
+  getRecentMessages: vi.fn(),
+  addMessage: vi.fn(),
+}));
+const threadId = "550e8400-e29b-41d4-a716-446655440000";
+beforeEach(() => {
+  vi.mocked(conversations.requireThread).mockResolvedValue({
+    threadId,
+    title: "Test",
+    createdAt: "now",
+    updatedAt: "now",
+  });
+  vi.mocked(conversations.getRecentMessages).mockResolvedValue([]);
+  vi.mocked(conversations.addMessage).mockImplementation(
+    async (_sub, id, role, content) => ({
+      messageId: `${role}-id`,
+      threadId: id,
+      role,
+      content,
+      createdAt: "now",
+    }),
+  );
+});
 
 interface ResponseMetadata {
   statusCode: number;
@@ -71,6 +99,9 @@ afterAll(() => {
 
 const buildEvent = (body: string) => ({
   stageVariables: { allowedOrigin: "https://example.com" },
+  path: "/chat",
+  httpMethod: "POST",
+  requestContext: { authorizer: { claims: { sub: "user-a" } } },
   body,
 });
 
@@ -154,10 +185,7 @@ test("returns 500 when allowedOrigin stage variable is missing", async () => {
 test("returns 400 when request body is missing", async () => {
   const stream = createMockStream();
 
-  await invokeHandler(
-    { stageVariables: { allowedOrigin: "https://example.com" } },
-    stream,
-  );
+  await invokeHandler(buildEvent(""), stream);
 
   assert.equal(stream.metadata?.statusCode, 400);
   assert.equal(
@@ -180,100 +208,26 @@ test("returns 400 when request body is invalid JSON", async () => {
   });
 });
 
-const validBody = {
-  threadId: "thread-123",
-  messages: [{ role: "user", content: "Hi" }],
-};
-
-for (const [name, body, paths] of [
-  ["missing threadId", { messages: validBody.messages }, [["threadId"]]],
-  ["empty threadId", { ...validBody, threadId: "" }, [["threadId"]]],
-  ["numeric threadId", { ...validBody, threadId: 42 }, [["threadId"]]],
-  ["missing messages", { threadId: "thread-123" }, [["messages"]]],
-  ["non-array messages", { ...validBody, messages: "invalid" }, [["messages"]]],
-  ["empty messages", { ...validBody, messages: [] }, [["messages"]]],
-  [
-    "unsupported role",
-    { ...validBody, messages: [{ role: "tool", content: "Hi" }] },
-    [["messages", 0, "role"]],
-  ],
-  [
-    "non-text content",
-    { ...validBody, messages: [{ role: "user", content: 42 }] },
-    [["messages", 0, "content"]],
-  ],
-  ["null message", { ...validBody, messages: [null] }, [["messages", 0]]],
-  ["empty model", { ...validBody, model: "" }, [["model"]]],
-  ["numeric model", { ...validBody, model: 42 }, [["model"]]],
-  ["null model", { ...validBody, model: null }, [["model"]]],
-  [
-    "string temperature",
-    { ...validBody, temperature: "0.7" },
-    [["temperature"]],
-  ],
-  ["null temperature", { ...validBody, temperature: null }, [["temperature"]]],
-  ["null payload", null, [[]]],
-  ["array payload", [], [[]]],
-  ["string payload", "invalid", [[]]],
-  ["numeric payload", 42, [[]]],
-  ["boolean payload", true, [[]]],
-  [
-    "multiple invalid fields",
-    { ...validBody, threadId: "", messages: [] },
-    [["threadId"], ["messages"]],
-  ],
-] as const) {
-  test(`returns validation issues for ${name} without calling external services`, async () => {
-    const logMock = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const secretMock = vi.spyOn(SecretsManagerClient.prototype, "send");
-    vi.stubEnv("OPENAI_API_KEY", undefined);
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+for (const body of [
+  {},
+  { threadId, content: "" },
+  { threadId, content: " " },
+  { threadId: "bad", content: "Hi" },
+  { threadId, content: "x".repeat(5001) },
+  { threadId, content: "Hi", sub: "other" },
+  { threadId, content: "Hi", messages: [] },
+  { threadId, content: "Hi", model: "gpt-4o" },
+  null,
+  [],
+]) {
+  test(`rejects invalid chat payload ${JSON.stringify(body).slice(0, 100)}`, async () => {
     const stream = createMockStream();
+    const secret = vi.spyOn(SecretsManagerClient.prototype, "send");
     await invokeHandler(buildEvent(JSON.stringify(body)), stream);
-
     assert.equal(stream.metadata?.statusCode, 400);
-    assert.equal(stream.metadata?.headers["Content-Type"], "application/json");
-    assert.equal(
-      stream.metadata?.headers["Access-Control-Allow-Origin"],
-      "https://example.com",
-    );
-    assert.equal(stream.ended, true);
-    const response = JSON.parse(stream.chunks.join(""));
-    assert.equal(response.error, "Invalid request body");
-    assert.deepEqual(
-      response.issues.map((issue: { path: unknown[] }) => issue.path),
-      paths,
-    );
-    for (const issue of response.issues) {
-      assert.deepEqual(Object.keys(issue).sort(), ["message", "path"]);
-      assert.equal(typeof issue.message, "string");
-      assert.ok(issue.message.length > 0);
-    }
-    assert.deepEqual(logMock.mock.calls, [
-      ["Request validation failed", { issues: response.issues }],
-    ]);
-    assert.equal(secretMock.mock.calls.length, 0);
-    assert.equal(fetchMock.mock.calls.length, 0);
+    assert.equal(secret.mock.calls.length, 0);
   });
 }
-
-test("returns a validation issue for non-finite temperature", async () => {
-  const stream = createMockStream();
-  await invokeHandler(
-    buildEvent(
-      '{"threadId":"thread-123","messages":[{"role":"user","content":"Hi"}],"temperature":1e400}',
-    ),
-    stream,
-  );
-  assert.equal(stream.metadata?.statusCode, 400);
-  const response = JSON.parse(stream.chunks.join(""));
-  assert.equal(response.error, "Invalid request body");
-  assert.deepEqual(
-    response.issues.map((issue: { path: unknown[] }) => issue.path),
-    [["temperature"]],
-  );
-});
 
 test("streams delta/done events assembling the full reply across multiple reads", async () => {
   const calls: Array<{
@@ -298,8 +252,8 @@ test("streams delta/done events assembling the full reply across multiple reads"
   await invokeHandler(
     buildEvent(
       JSON.stringify({
-        threadId: "thread-123",
-        messages: [{ role: "user", content: "Hi" }],
+        threadId: threadId,
+        content: "Hi",
       }),
     ),
     stream,
@@ -314,7 +268,10 @@ test("streams delta/done events assembling the full reply across multiple reads"
     events.filter((e) => e.event === "delta").map((e) => e.data.content),
     ["Hel", "lo"],
   );
-  assert.deepEqual(events.at(-1), { event: "done", data: {} });
+  assert.deepEqual(events.at(-1), {
+    event: "done",
+    data: { userMessageId: "user-id", assistantMessageId: "assistant-id" },
+  });
 
   assert.equal(calls.length, 1);
   const [{ input, init }] = calls;
@@ -342,8 +299,8 @@ test("emits an error event when OpenAI responds with a non-success status", asyn
   await invokeHandler(
     buildEvent(
       JSON.stringify({
-        threadId: "thread-123",
-        messages: [{ role: "user", content: "Hi" }],
+        threadId: threadId,
+        content: "Hi",
       }),
     ),
     stream,
@@ -370,8 +327,8 @@ test("emits an error event when the OpenAI request throws", async () => {
   await invokeHandler(
     buildEvent(
       JSON.stringify({
-        threadId: "thread-123",
-        messages: [{ role: "user", content: "Hi" }],
+        threadId: threadId,
+        content: "Hi",
       }),
     ),
     stream,
@@ -401,8 +358,8 @@ test("emits an error event when OpenAI streams a failed response", async () => {
   await invokeHandler(
     buildEvent(
       JSON.stringify({
-        threadId: "thread-123",
-        messages: [{ role: "user", content: "Hi" }],
+        threadId: threadId,
+        content: "Hi",
       }),
     ),
     stream,
@@ -428,8 +385,8 @@ test("emits a timeout-specific error event when the request budget is exceeded",
   await invokeHandler(
     buildEvent(
       JSON.stringify({
-        threadId: "thread-123",
-        messages: [{ role: "user", content: "Hi" }],
+        threadId: threadId,
+        content: "Hi",
       }),
     ),
     stream,
@@ -463,8 +420,8 @@ test("writes heartbeat pings while waiting on a slow OpenAI response", async () 
   const handlerPromise = invokeHandler(
     buildEvent(
       JSON.stringify({
-        threadId: "thread-123",
-        messages: [{ role: "user", content: "Hi" }],
+        threadId: threadId,
+        content: "Hi",
       }),
     ),
     stream,
@@ -498,8 +455,8 @@ test("writes heartbeat pings while waiting on a slow OpenAI response", async () 
 const validRequest = (overrides: Record<string, unknown> = {}) =>
   buildEvent(
     JSON.stringify({
-      threadId: "thread-123",
-      messages: [{ role: "user", content: "Hi" }],
+      threadId: threadId,
+      content: "Hi",
       ...overrides,
     }),
   );
@@ -534,7 +491,7 @@ for (const terminal of [
   });
 }
 
-test("uses the existing AWS secret key and honors model and temperature overrides", async () => {
+test("uses the existing AWS secret key and server-controlled model settings", async () => {
   vi.stubEnv("OPENAI_API_KEY", undefined);
   vi.stubEnv("OPENAI_SECRET_ID", "existing-secret");
   const secretMock = vi
@@ -552,8 +509,8 @@ test("uses the existing AWS secret key and honors model and temperature override
         "Bearer existing-secret-key",
       );
       const body = JSON.parse(init?.body as string);
-      assert.equal(body.model, "gpt-4o");
-      assert.equal(body.temperature, 0.2);
+      assert.equal(body.model, "gpt-4o-mini");
+      assert.equal(body.temperature, 0.7);
       assert.equal(body.store, false);
       return new Response(
         fakeSseBody(['data: {"type":"response.completed","response":{}}\n\n']),
@@ -562,10 +519,7 @@ test("uses the existing AWS secret key and honors model and temperature override
   );
   vi.stubGlobal("fetch", fetchMock);
   const stream = createMockStream();
-  await invokeHandler(
-    validRequest({ model: "gpt-4o", temperature: 0.2 }),
-    stream,
-  );
+  await invokeHandler(validRequest(), stream);
   assert.equal(secretMock.mock.calls.length, 1);
   assert.equal(fetchMock.mock.calls.length, 1);
   assert.equal(parseSseEvents(stream.chunks.join("")).at(-1)?.event, "done");
@@ -610,58 +564,6 @@ test("aborting an active request emits a timeout error and clears heartbeats", a
   assert.equal(vi.getTimerCount(), 0);
 });
 
-test("preserves supported roles and maps developer to system at the SDK boundary", async () => {
-  const messages = [
-    { role: "system", content: "System" },
-    { role: "developer", content: "Developer" },
-    { role: "user", content: "" },
-    { role: "assistant", content: "Reply" },
-  ];
-  const streamTextMock = vi.spyOn(ai, "streamText").mockReturnValue({
-    fullStream: (async function* () {
-      yield { type: "finish", finishReason: "stop" };
-    })(),
-  } as unknown as ReturnType<typeof ai.streamText>);
-  const stream = createMockStream();
-  await invokeHandler(validRequest({ messages }), stream);
-  assert.equal(streamTextMock.mock.calls.length, 1);
-  assert.deepEqual(
-    streamTextMock.mock.calls[0][0].messages,
-    messages.map(({ role, content }) => ({
-      role: role === "developer" ? "system" : role,
-      content,
-    })),
-  );
-  assert.equal(parseSseEvents(stream.chunks.join("")).at(-1)?.event, "done");
-});
-
-test("preserves whitespace and accepts unknown fields and unbounded finite temperature", async () => {
-  const fetchMock = vi.fn(
-    async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(init?.body as string);
-      assert.equal(body.model, " custom-model ");
-      assert.equal(body.temperature, 3);
-      assert.equal(body.extra, undefined);
-      return new Response(
-        fakeSseBody(['data: {"type":"response.completed","response":{}}\n\n']),
-      );
-    },
-  );
-  vi.stubGlobal("fetch", fetchMock);
-  const stream = createMockStream();
-  await invokeHandler(
-    validRequest({
-      threadId: " ",
-      model: " custom-model ",
-      temperature: 3,
-      extra: true,
-    }),
-    stream,
-  );
-  assert.equal(fetchMock.mock.calls.length, 1);
-  assert.equal(parseSseEvents(stream.chunks.join("")).at(-1)?.event, "done");
-});
-
 for (const secret of [
   {},
   { SecretString: "null" },
@@ -677,8 +579,10 @@ for (const secret of [
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const logMock = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(conversations.addMessage).mockClear();
     const stream = createMockStream();
     await invokeHandler(validRequest(), stream);
+    assert.equal(vi.mocked(conversations.addMessage).mock.calls.length, 0);
     assert.equal(stream.metadata?.statusCode, 500);
     assert.deepEqual(JSON.parse(stream.chunks.join("")), {
       error: "Server error",
@@ -698,3 +602,171 @@ for (const secret of [
     }
   });
 }
+
+test("requires trusted Cognito identity before processing requests", async () => {
+  for (const path of ["/chat", "/threads"]) {
+    const stream = createMockStream();
+    await invokeHandler(
+      { ...validRequest(), path, requestContext: undefined },
+      stream,
+    );
+    assert.equal(stream.metadata?.statusCode, 401);
+  }
+});
+
+test("builds AI input from stored history and saves both messages before done", async () => {
+  vi.mocked(conversations.getRecentMessages).mockResolvedValue([
+    {
+      messageId: "old",
+      threadId,
+      role: "assistant",
+      content: "Previous",
+      createdAt: "now",
+    },
+  ]);
+  const stream = createMockStream();
+  const model = vi.spyOn(ai, "streamText").mockImplementation((options) => {
+    assert.deepEqual(options.messages, [
+      { role: "assistant", content: "Previous" },
+      { role: "user", content: "Hi" },
+    ]);
+    assert.equal(
+      vi.mocked(conversations.addMessage).mock.lastCall?.[2],
+      "user",
+    );
+    return {
+      fullStream: (async function* () {
+        yield { type: "text-delta", text: "Answer" };
+        yield { type: "finish", finishReason: "stop" };
+      })(),
+    } as unknown as ReturnType<typeof ai.streamText>;
+  });
+  vi.mocked(conversations.addMessage).mockImplementation(
+    async (_sub, id, role, content) => {
+      assert.equal(
+        parseSseEvents(stream.chunks.join("")).some((e) => e.event === "done"),
+        false,
+      );
+      return {
+        messageId: role + "-id",
+        threadId: id,
+        role,
+        content,
+        createdAt: "now",
+      };
+    },
+  );
+  await invokeHandler(validRequest(), stream);
+  assert.equal(model.mock.calls.length, 1);
+  assert.deepEqual(
+    vi
+      .mocked(conversations.addMessage)
+      .mock.calls.slice(-2)
+      .map((call) => call.slice(2)),
+    [
+      ["user", "Hi"],
+      ["assistant", "Answer"],
+    ],
+  );
+  assert.equal(parseSseEvents(stream.chunks.join("")).at(-1)?.event, "done");
+});
+
+test("assistant persistence failure emits error without done", async () => {
+  vi.spyOn(ai, "streamText").mockReturnValue({
+    fullStream: (async function* () {
+      yield { type: "text-delta", text: "Answer" };
+      yield { type: "finish", finishReason: "stop" };
+    })(),
+  } as unknown as ReturnType<typeof ai.streamText>);
+  vi.mocked(conversations.addMessage).mockImplementation(
+    async (_sub, id, role, content) => {
+      if (role === "assistant") throw new Error("Database unavailable");
+      return {
+        messageId: "user-id",
+        threadId: id,
+        role,
+        content,
+        createdAt: "now",
+      };
+    },
+  );
+  const stream = createMockStream();
+  await invokeHandler(validRequest(), stream);
+  assert.deepEqual(
+    parseSseEvents(stream.chunks.join("")).map((e) => e.event),
+    ["delta", "error"],
+  );
+});
+
+test("upstream failure never persists partial assistant text", async () => {
+  vi.spyOn(ai, "streamText").mockReturnValue({
+    fullStream: (async function* () {
+      yield { type: "text-delta", text: "Partial" };
+      yield { type: "error", error: new Error("Upstream failure") };
+    })(),
+  } as unknown as ReturnType<typeof ai.streamText>);
+  vi.mocked(conversations.addMessage).mockClear();
+  const stream = createMockStream();
+  await invokeHandler(validRequest(), stream);
+  assert.equal(vi.mocked(conversations.addMessage).mock.calls.length, 1);
+  assert.equal(vi.mocked(conversations.addMessage).mock.calls[0][2], "user");
+  assert.deepEqual(
+    parseSseEvents(stream.chunks.join("")).map((e) => e.event),
+    ["delta", "error"],
+  );
+});
+
+test("missing threads return 404 before saving or calling AI", async () => {
+  vi.mocked(conversations.requireThread).mockRejectedValue(
+    new conversations.NotFoundError(),
+  );
+  vi.mocked(conversations.addMessage).mockClear();
+  const stream = createMockStream();
+  await invokeHandler(validRequest(), stream);
+  assert.equal(stream.metadata?.statusCode, 404);
+  assert.equal(vi.mocked(conversations.addMessage).mock.calls.length, 0);
+});
+
+test("serves JSON CRUD through streaming metadata and preserves empty 204 bodies", async () => {
+  const stream = createMockStream();
+  await invokeHandler(
+    {
+      ...validRequest(),
+      path: `/threads/${threadId}`,
+      httpMethod: "GET",
+      body: undefined,
+    },
+    stream,
+  );
+  assert.equal(stream.metadata?.statusCode, 200);
+  assert.equal(JSON.parse(stream.chunks.join("")).threadId, threadId);
+  assert.equal(
+    stream.metadata?.headers["Access-Control-Allow-Headers"],
+    "Content-Type,Authorization,X-Api-Key",
+  );
+});
+
+test("user persistence failure returns JSON 500 without starting generation", async () => {
+  vi.mocked(conversations.addMessage).mockRejectedValueOnce(
+    new Error("Write failed"),
+  );
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  const stream = createMockStream();
+  await invokeHandler(validRequest(), stream);
+  assert.equal(stream.metadata?.statusCode, 500);
+  assert.equal(fetchMock.mock.calls.length, 0);
+  assert.equal(parseSseEvents(stream.chunks.join("")).length, 0);
+});
+
+test("successful deletion returns streaming metadata 204 and no response body", async () => {
+  vi.mocked(conversations.deleteThread).mockResolvedValueOnce(undefined);
+  const stream = createMockStream();
+  await invokeHandler(
+    { ...validRequest(), path: `/threads/${threadId}`, httpMethod: "DELETE" },
+    stream,
+  );
+  assert.equal(stream.metadata?.statusCode, 204);
+  assert.equal(stream.chunks.join(""), "");
+  assert.equal(stream.ended, true);
+});
