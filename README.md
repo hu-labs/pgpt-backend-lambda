@@ -26,6 +26,8 @@ npm run check
 
 This verifies formatting, lint rules, and unit tests. GitHub Actions runs the same check before deployment and follows deployment with a smoke test.
 
+For local authenticated tests against deployed stacks, see [the smoke-test instructions](scripts/lib/README.md).
+
 ## Conversation API
 
 All endpoints require an API Gateway verified Cognito ID token and an API key.

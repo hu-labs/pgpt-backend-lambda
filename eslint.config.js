@@ -3,6 +3,7 @@ import eslintConfigPrettier from "eslint-config-prettier/flat";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 import { defineConfig, globalIgnores } from "eslint/config";
+import stylistic from "@stylistic/eslint-plugin";
 
 export default defineConfig([
   globalIgnores(["dist"]),
@@ -26,4 +27,16 @@ export default defineConfig([
   },
 
   eslintConfigPrettier,
+
+  {
+    plugins: { "@stylistic": stylistic },
+    rules: {
+      "@stylistic/padding-line-between-statements": [
+        "error",
+        { blankLine: "always", prev: "multiline-const", next: "*" },
+        { blankLine: "always", prev: "multiline-expression", next: "*" },
+        { blankLine: "always", prev: "*", next: "return" },
+      ],
+    },
+  },
 ]);

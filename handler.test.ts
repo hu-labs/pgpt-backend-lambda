@@ -17,6 +17,7 @@ vi.mock("./conversations.js", async (importOriginal) => ({
   getRecentMessages: vi.fn(),
   addMessage: vi.fn(),
 }));
+
 const threadId = "550e8400-e29b-41d4-a716-446655440000";
 beforeEach(() => {
   vi.mocked(conversations.requireThread).mockResolvedValue({
@@ -25,6 +26,7 @@ beforeEach(() => {
     createdAt: "now",
     updatedAt: "now",
   });
+
   vi.mocked(conversations.getRecentMessages).mockResolvedValue([]);
   vi.mocked(conversations.addMessage).mockImplementation(
     async (_sub, id, role, content) => ({
@@ -69,6 +71,7 @@ Object.assign(globalThis, {
       from: (stream: unknown, metadata: ResponseMetadata): MockStream => {
         const mockStream = stream as MockStream;
         mockStream.metadata = metadata;
+
         return mockStream;
       },
     },
@@ -91,6 +94,7 @@ afterEach(() => {
 afterAll(() => {
   if (originalApiKey === undefined) {
     delete process.env.OPENAI_API_KEY;
+
     return;
   }
 
@@ -128,10 +132,12 @@ function createMockStream(): MockStream {
 function fakeSseBody(rawChunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   let index = 0;
+
   return new ReadableStream<Uint8Array>({
     pull(controller) {
       if (index >= rawChunks.length) {
         controller.close();
+
         return;
       }
 
@@ -148,6 +154,7 @@ function parseSseEvents(text: string): ParsedSseEvent[] {
     .filter((block) => block.startsWith("event:"))
     .map((block) => {
       const [eventLine, dataLine] = block.split("\n");
+
       return {
         event: eventLine.slice("event:".length).trim(),
         data: JSON.parse(dataLine.slice("data:".length).trim()) as Record<
@@ -177,6 +184,7 @@ test("returns 500 when allowedOrigin stage variable is missing", async () => {
   assert.deepEqual(stream.metadata?.headers, {
     "Content-Type": "application/json",
   });
+
   assert.deepEqual(JSON.parse(stream.chunks.join("")), {
     error: "Missing stage variable: allowedOrigin",
   });
@@ -192,6 +200,7 @@ test("returns 400 when request body is missing", async () => {
     stream.metadata?.headers["Access-Control-Allow-Origin"],
     "https://example.com",
   );
+
   assert.deepEqual(JSON.parse(stream.chunks.join("")), {
     error: "Missing request body",
   });
@@ -234,9 +243,11 @@ test("streams delta/done events assembling the full reply across multiple reads"
     input: RequestInfo | URL;
     init?: RequestInit;
   }> = [];
+
   const fetchMock = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ input, init });
+
       return new Response(
         fakeSseBody([
           'event: response.created\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg_1","delta":"Hel"}\n\n',
@@ -246,6 +257,7 @@ test("streams delta/done events assembling the full reply across multiple reads"
       );
     },
   );
+
   vi.stubGlobal("fetch", fetchMock);
   const stream = createMockStream();
 
@@ -268,6 +280,7 @@ test("streams delta/done events assembling the full reply across multiple reads"
     events.filter((e) => e.event === "delta").map((e) => e.data.content),
     ["Hel", "lo"],
   );
+
   assert.deepEqual(events.at(-1), {
     event: "done",
     data: { userMessageId: "user-id", assistantMessageId: "assistant-id" },
@@ -286,6 +299,7 @@ test("streams delta/done events assembling the full reply across multiple reads"
     store: false,
     stream: true,
   });
+
   assert.ok(init.signal instanceof AbortSignal);
 });
 
@@ -294,6 +308,7 @@ test("emits an error event when OpenAI responds with a non-success status", asyn
     "fetch",
     vi.fn(async () => new Response(null, { status: 429 })),
   );
+
   const stream = createMockStream();
 
   await invokeHandler(
@@ -322,6 +337,7 @@ test("emits an error event when the OpenAI request throws", async () => {
       throw new Error("mock OpenAI failure");
     }),
   );
+
   const stream = createMockStream();
 
   await invokeHandler(
@@ -353,6 +369,7 @@ test("emits an error event when OpenAI streams a failed response", async () => {
         ),
     ),
   );
+
   const stream = createMockStream();
 
   await invokeHandler(
@@ -380,6 +397,7 @@ test("emits a timeout-specific error event when the request budget is exceeded",
       throw timeoutErr;
     }),
   );
+
   const stream = createMockStream();
 
   await invokeHandler(
@@ -415,6 +433,7 @@ test("writes heartbeat pings while waiting on a slow OpenAI response", async () 
         }),
     ),
   );
+
   const stream = createMockStream();
 
   const handlerPromise = invokeHandler(
@@ -442,6 +461,7 @@ test("writes heartbeat pings while waiting on a slow OpenAI response", async () 
       { status: 200 },
     ),
   );
+
   await handlerPromise;
 
   assert.equal(vi.getTimerCount(), 0);
@@ -480,12 +500,14 @@ for (const terminal of [
           ),
       ),
     );
+
     const stream = createMockStream();
     await invokeHandler(validRequest(), stream);
     assert.deepEqual(
       parseSseEvents(stream.chunks.join("")).map((e) => e.event),
       ["delta", "error"],
     );
+
     assert.equal(stream.ended, true);
     assert.equal(vi.getTimerCount(), 0);
   });
@@ -498,25 +520,30 @@ test("uses the existing AWS secret key and server-controlled model settings", as
     .spyOn(SecretsManagerClient.prototype, "send")
     .mockImplementation(async (command) => {
       assert.deepEqual(command.input, { SecretId: "existing-secret" });
+
       return {
         SecretString: JSON.stringify({ OPENAI_API_KEY: "existing-secret-key" }),
       };
     });
+
   const fetchMock = vi.fn(
     async (_input: RequestInfo | URL, init?: RequestInit) => {
       assert.equal(
         new Headers(init?.headers).get("authorization"),
         "Bearer existing-secret-key",
       );
+
       const body = JSON.parse(init?.body as string);
       assert.equal(body.model, "gpt-4o-mini");
       assert.equal(body.temperature, 0.7);
       assert.equal(body.store, false);
+
       return new Response(
         fakeSseBody(['data: {"type":"response.completed","response":{}}\n\n']),
       );
     },
   );
+
   vi.stubGlobal("fetch", fetchMock);
   const stream = createMockStream();
   await invokeHandler(validRequest(), stream);
@@ -538,6 +565,7 @@ test("aborting an active request emits a timeout error and clears heartbeats", a
   const timeout = vi
     .spyOn(AbortSignal, "timeout")
     .mockReturnValue(controller.signal);
+
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -547,10 +575,12 @@ test("aborting an active request emits a timeout error and clears heartbeats", a
           () => reject(init.signal?.reason),
           { once: true },
         );
+
         controller.abort(new DOMException("Budget exceeded", "TimeoutError"));
       });
     }),
   );
+
   const stream = createMockStream();
   await invokeHandler(validRequest(), stream);
   assert.equal(timeout.mock.calls[0][0], 290_000);
@@ -560,6 +590,7 @@ test("aborting an active request emits a timeout error and clears heartbeats", a
       data: { message: "Backend timed out while waiting for the AI response." },
     },
   ]);
+
   assert.equal(stream.ended, true);
   assert.equal(vi.getTimerCount(), 0);
 });
@@ -576,6 +607,7 @@ for (const secret of [
     vi.spyOn(SecretsManagerClient.prototype, "send").mockImplementation(
       async () => secret,
     );
+
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const logMock = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -587,6 +619,7 @@ for (const secret of [
     assert.deepEqual(JSON.parse(stream.chunks.join("")), {
       error: "Server error",
     });
+
     assert.equal(stream.ended, true);
     assert.equal(fetchMock.mock.calls.length, 0);
     if (!secret.SecretString) {
@@ -610,6 +643,7 @@ test("requires trusted Cognito identity before processing requests", async () =>
       { ...validRequest(), path, requestContext: undefined },
       stream,
     );
+
     assert.equal(stream.metadata?.statusCode, 401);
   }
 });
@@ -624,16 +658,19 @@ test("builds AI input from stored history and saves both messages before done", 
       createdAt: "now",
     },
   ]);
+
   const stream = createMockStream();
   const model = vi.spyOn(ai, "streamText").mockImplementation((options) => {
     assert.deepEqual(options.messages, [
       { role: "assistant", content: "Previous" },
       { role: "user", content: "Hi" },
     ]);
+
     assert.equal(
       vi.mocked(conversations.addMessage).mock.lastCall?.[2],
       "user",
     );
+
     return {
       fullStream: (async function* () {
         yield { type: "text-delta", text: "Answer" };
@@ -641,12 +678,14 @@ test("builds AI input from stored history and saves both messages before done", 
       })(),
     } as unknown as ReturnType<typeof ai.streamText>;
   });
+
   vi.mocked(conversations.addMessage).mockImplementation(
     async (_sub, id, role, content) => {
       assert.equal(
         parseSseEvents(stream.chunks.join("")).some((e) => e.event === "done"),
         false,
       );
+
       return {
         messageId: role + "-id",
         threadId: id,
@@ -656,6 +695,7 @@ test("builds AI input from stored history and saves both messages before done", 
       };
     },
   );
+
   await invokeHandler(validRequest(), stream);
   assert.equal(model.mock.calls.length, 1);
   assert.deepEqual(
@@ -668,6 +708,7 @@ test("builds AI input from stored history and saves both messages before done", 
       ["assistant", "Answer"],
     ],
   );
+
   assert.equal(parseSseEvents(stream.chunks.join("")).at(-1)?.event, "done");
 });
 
@@ -678,9 +719,11 @@ test("assistant persistence failure emits error without done", async () => {
       yield { type: "finish", finishReason: "stop" };
     })(),
   } as unknown as ReturnType<typeof ai.streamText>);
+
   vi.mocked(conversations.addMessage).mockImplementation(
     async (_sub, id, role, content) => {
       if (role === "assistant") throw new Error("Database unavailable");
+
       return {
         messageId: "user-id",
         threadId: id,
@@ -690,6 +733,7 @@ test("assistant persistence failure emits error without done", async () => {
       };
     },
   );
+
   const stream = createMockStream();
   await invokeHandler(validRequest(), stream);
   assert.deepEqual(
@@ -705,6 +749,7 @@ test("upstream failure never persists partial assistant text", async () => {
       yield { type: "error", error: new Error("Upstream failure") };
     })(),
   } as unknown as ReturnType<typeof ai.streamText>);
+
   vi.mocked(conversations.addMessage).mockClear();
   const stream = createMockStream();
   await invokeHandler(validRequest(), stream);
@@ -720,6 +765,7 @@ test("missing threads return 404 before saving or calling AI", async () => {
   vi.mocked(conversations.requireThread).mockRejectedValue(
     new conversations.NotFoundError(),
   );
+
   vi.mocked(conversations.addMessage).mockClear();
   const stream = createMockStream();
   await invokeHandler(validRequest(), stream);
@@ -738,6 +784,7 @@ test("serves JSON CRUD through streaming metadata and preserves empty 204 bodies
     },
     stream,
   );
+
   assert.equal(stream.metadata?.statusCode, 200);
   assert.equal(JSON.parse(stream.chunks.join("")).threadId, threadId);
   assert.equal(
@@ -750,6 +797,7 @@ test("user persistence failure returns JSON 500 without starting generation", as
   vi.mocked(conversations.addMessage).mockRejectedValueOnce(
     new Error("Write failed"),
   );
+
   const fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
   const stream = createMockStream();
@@ -766,6 +814,7 @@ test("successful deletion returns streaming metadata 204 and no response body", 
     { ...validRequest(), path: `/threads/${threadId}`, httpMethod: "DELETE" },
     stream,
   );
+
   assert.equal(stream.metadata?.statusCode, 204);
   assert.equal(stream.chunks.join(""), "");
   assert.equal(stream.ended, true);
