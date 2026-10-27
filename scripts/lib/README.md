@@ -67,7 +67,9 @@ leave test data behind; avoid blindly retrying after a dropped connection.
 Without `--authenticated`, the same script checks only that unauthenticated
 `POST /chat` and `POST /threads` requests return JSON with status 401. It does not
 log in or create data. Existing GitHub Actions environment variables continue to
-work, and CI does not load local dotenv files or need account passwords.
+work, and CI does not load local dotenv files or need account passwords. This
+mode uses only Node.js built-ins and needs no npm dependency installation.
+Promotion and rollback workflows select Node.js 24 before running it.
 
 ```bash
 source scripts/setenv-preview.sh test && ./scripts/smoke-test.sh
