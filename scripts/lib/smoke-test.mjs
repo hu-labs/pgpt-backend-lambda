@@ -7,7 +7,6 @@
 // - setenv-production.sh
 
 import { pathToFileURL } from "node:url";
-import { loginCognito } from "./cognito-login.mjs";
 
 export function smokeConfig(env, args = []) {
   if (args.length > 1 || (args.length && args[0] !== "--authenticated"))
@@ -124,7 +123,7 @@ export async function runSmoke({
   env = process.env,
   args = [],
   fetchImpl = fetch,
-  login = loginCognito,
+  login,
   log = console.log,
   signal,
 } = {}) {
@@ -184,6 +183,9 @@ export async function runSmoke({
   );
 
   if (!config.authenticated) return;
+
+  // CI boundary checks use only Node built-ins; Cognito is needed for local login.
+  login ??= (await import("./cognito-login.mjs")).loginCognito;
 
   const credentials = (second = false) => ({
     poolId: env.COGNITO_USER_POOL_ID,
