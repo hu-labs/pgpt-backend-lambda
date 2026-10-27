@@ -41,8 +41,6 @@ AGENTS.md
 test-lambda.sh
 test_event.json
 test_response.json
-scripts/setenv-preview.sh
-scripts/setenv-production.sh
 
 policies/
 package/

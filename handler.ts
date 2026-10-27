@@ -44,6 +44,7 @@ const requestSchema = z
     content: contentSchema,
   })
   .strict();
+
 const secretSchema = z.object({ OPENAI_API_KEY: z.string() });
 
 // Convenience function to extract error message
@@ -60,6 +61,7 @@ const getApiKey = async (): Promise<string> => {
   const secret = await secretsManager.send(
     new GetSecretValueCommand({ SecretId: process.env.OPENAI_SECRET_ID }),
   );
+
   if (!secret.SecretString) {
     throw new Error("Invalid secret format: SecretString not found");
   }
@@ -74,6 +76,7 @@ const getApiKey = async (): Promise<string> => {
   if (!secretResult.success) {
     throw new Error("Invalid secret format: OPENAI_API_KEY not found");
   }
+
   return secretResult.data.OPENAI_API_KEY;
 };
 
@@ -98,9 +101,13 @@ export const handler = awslambda.streamifyResponse(
         statusCode: 500,
         headers: { "Content-Type": "application/json" },
       });
-      responseStream.end(
+
+      responseStream.write(
         JSON.stringify({ error: "Missing stage variable: allowedOrigin" }),
       );
+
+      responseStream.end();
+
       return;
     }
 
@@ -119,12 +126,15 @@ export const handler = awslambda.streamifyResponse(
         statusCode,
         headers: { ...headers, "Content-Type": "application/json" },
       });
-      responseStream.end(JSON.stringify(errorBody));
+
+      responseStream.write(JSON.stringify(errorBody));
+      responseStream.end();
     };
 
     const sub = event.requestContext?.authorizer?.claims?.sub;
     if (!sub || typeof sub !== "string" || !sub.trim()) {
       fail(401, { error: "Unauthorized" });
+
       return;
     }
     if (event.path !== "/chat") {
@@ -133,13 +143,19 @@ export const handler = awslambda.streamifyResponse(
         statusCode: response.statusCode,
         headers: { ...headers, "Content-Type": "application/json" },
       });
-      responseStream.end(
-        response.body === undefined ? undefined : JSON.stringify(response.body),
+
+      // Even an empty 204 needs a write to emit the integration metadata delimiter.
+      responseStream.write(
+        response.body === undefined ? "" : JSON.stringify(response.body),
       );
+
+      responseStream.end();
+
       return;
     }
     if (event.httpMethod !== "POST") {
       fail(405, { error: "Method not allowed" });
+
       return;
     }
 
@@ -147,6 +163,7 @@ export const handler = awslambda.streamifyResponse(
     try {
       if (!event.body) {
         fail(400, { error: "Missing request body" });
+
         return;
       }
 
@@ -157,7 +174,9 @@ export const handler = awslambda.streamifyResponse(
         console.error("Unable to parse request body", {
           error: errorMessage(parseErr),
         });
+
         fail(400, { error: "Invalid JSON payload" });
+
         return;
       }
       // Validate request body structure
@@ -167,8 +186,10 @@ export const handler = awslambda.streamifyResponse(
           path,
           message,
         }));
+
         console.warn("Request validation failed", { issues });
         fail(400, { error: "Invalid request body", issues });
+
         return;
       }
       const { threadId, content } = result.data;
@@ -182,6 +203,7 @@ export const handler = awslambda.streamifyResponse(
           threadId,
           error: errorMessage(err),
         });
+
         throw err;
       });
 
@@ -189,6 +211,7 @@ export const handler = awslambda.streamifyResponse(
         ...previous.map(({ role, content }) => ({ role, content })),
         { role: "user", content },
       ];
+
       // Persist the new user message after credentials are available.
       const userMessage = await addMessage(sub, threadId, "user", content);
 
@@ -258,6 +281,7 @@ export const handler = awslambda.streamifyResponse(
           "assistant",
           assistantText,
         );
+
         // Emit SSE done with the IDs of both stored messages.
         responseStream.write(
           sseEvent("done", {
@@ -269,10 +293,12 @@ export const handler = awslambda.streamifyResponse(
         const timedOut =
           err instanceof Error &&
           (err.name === "TimeoutError" || err.name === "AbortError");
+
         console.error("OpenAI streaming failed", {
           threadId,
           error: errorMessage(err),
         });
+
         responseStream.write(
           sseEvent("error", {
             message: timedOut
@@ -288,6 +314,7 @@ export const handler = awslambda.streamifyResponse(
       console.error("Unexpected server error", {
         error: errorMessage(err),
       });
+
       const response = routeError(err);
       fail(response.statusCode, response.body as SseData);
     }

@@ -35,6 +35,7 @@ const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const tableName = () => {
   const name = process.env.DYNAMODB_TABLE_NAME;
   if (!name) throw new Error("DYNAMODB_TABLE_NAME is missing");
+
   return name;
 };
 
@@ -89,6 +90,7 @@ export async function createThread(
     createdAt: now,
     updatedAt: now,
   };
+
   await db.send(
     new PutCommand({
       TableName: tableName(),
@@ -96,6 +98,7 @@ export async function createThread(
       ConditionExpression: "attribute_not_exists(PK)",
     }),
   );
+
   return thread;
 }
 
@@ -112,9 +115,11 @@ export async function listThreads(sub: string): Promise<Thread[]> {
         ExclusiveStartKey: cursor,
       }),
     );
+
     threads.push(...(result.Items ?? []).map(toThread));
     cursor = result.LastEvaluatedKey;
   } while (cursor);
+
   return threads.sort(
     (a, b) =>
       b.updatedAt.localeCompare(a.updatedAt) ||
@@ -133,6 +138,7 @@ export async function getThread(
       ConsistentRead: true,
     }),
   );
+
   return result.Item ? toThread(result.Item) : null;
 }
 
@@ -142,6 +148,7 @@ export async function requireThread(
 ): Promise<Thread> {
   const thread = await getThread(sub, threadId);
   if (!thread) throw new NotFoundError("Thread not found");
+
   return thread;
 }
 
@@ -163,6 +170,7 @@ export async function renameThread(
       ReturnValues: "ALL_NEW",
     }),
   );
+
   return toThread(result.Attributes!);
 }
 const cursorSchema = z.object({ PK: z.string(), SK: z.string() }).strict();
@@ -179,6 +187,7 @@ function decodeCursor(
     const key = cursorSchema.parse(
       JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")),
     );
+
     const prefix = `MSG#${threadId}#`;
     if (
       key.PK !== userPK(sub) ||
@@ -186,6 +195,7 @@ function decodeCursor(
       !/^\d{13}-[0-9a-f-]{36}$/i.test(key.SK.slice(prefix.length))
     )
       throw new Error();
+
     return key;
   } catch {
     throw new InvalidCursorError("Invalid cursor");
@@ -212,6 +222,7 @@ export async function listMessages(
       ExclusiveStartKey: decodeCursor(cursor, sub, threadId),
     }),
   );
+
   return {
     messages: (result.Items ?? []).map(toMessage),
     nextCursor: result.LastEvaluatedKey
@@ -244,9 +255,11 @@ export async function getRecentMessages(
         ExclusiveStartKey: cursor,
       }),
     );
+
     messages.push(...(result.Items ?? []).map(toMessage));
     cursor = result.LastEvaluatedKey;
   } while (cursor && messages.length < 30);
+
   return messages.reverse();
 }
 
@@ -265,6 +278,7 @@ export async function addMessage(
     content,
     createdAt: new Date(now).toISOString(),
   };
+
   // Commit the message and parent timestamp together; a missing parent cannot create an orphan.
   try {
     await db.send(
@@ -303,6 +317,7 @@ export async function addMessage(
       throw new NotFoundError("Thread not found");
     throw error;
   }
+
   return message;
 }
 
@@ -323,6 +338,7 @@ export async function editMessage(
       ReturnValues: "ALL_NEW",
     }),
   );
+
   return toMessage(result.Attributes!);
 }
 

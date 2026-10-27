@@ -23,6 +23,7 @@ const messageIdSchema = z
 
 export function requestBody(event: RequestEvent): unknown {
   if (!event.body) throw new SyntaxError("Missing request body");
+
   return JSON.parse(event.body);
 }
 
@@ -36,6 +37,7 @@ export function routeError(error: unknown): RouteResponse {
   )
     return { statusCode: 400, body: { error: "Invalid request" } };
   console.error("Request failed", error);
+
   return { statusCode: 500, body: { error: "Server error" } };
 }
 
@@ -48,6 +50,7 @@ export async function dispatchThreadRoute(
   const match = /^\/threads(?:\/([^/]+)(?:\/(messages)(?:\/([^/]+))?)?)?$/.exec(
     path,
   );
+
   if (!match) return { statusCode: 404, body: { error: "Route not found" } };
   try {
     const [, rawThreadId, messages, rawMessageId] = match;
@@ -62,6 +65,7 @@ export async function dispatchThreadRoute(
           .object({ title: titleSchema.optional() })
           .strict()
           .parse(requestBody(event));
+
         return {
           statusCode: 201,
           body: await conversations.createThread(sub, body.title),
@@ -80,6 +84,7 @@ export async function dispatchThreadRoute(
             .object({ title: titleSchema })
             .strict()
             .parse(requestBody(event));
+
           return {
             statusCode: 200,
             body: await conversations.renameThread(sub, threadId, body.title),
@@ -87,6 +92,7 @@ export async function dispatchThreadRoute(
         }
         if (method === "DELETE") {
           await conversations.deleteThread(sub, threadId);
+
           return { statusCode: 204 };
         }
       } else if (!rawMessageId) {
@@ -104,6 +110,7 @@ export async function dispatchThreadRoute(
             .object({ content: contentSchema })
             .strict()
             .parse(requestBody(event));
+
           return {
             statusCode: 201,
             body: await conversations.addMessage(
@@ -121,6 +128,7 @@ export async function dispatchThreadRoute(
             .object({ content: contentSchema })
             .strict()
             .parse(requestBody(event));
+
           return {
             statusCode: 200,
             body: await conversations.editMessage(
@@ -133,10 +141,12 @@ export async function dispatchThreadRoute(
         }
         if (method === "DELETE") {
           await conversations.deleteMessage(sub, threadId, messageId);
+
           return { statusCode: 204 };
         }
       }
     }
+
     return { statusCode: 405, body: { error: "Method not allowed" } };
   } catch (error) {
     return routeError(error);

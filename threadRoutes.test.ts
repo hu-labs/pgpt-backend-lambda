@@ -43,6 +43,7 @@ beforeEach(() => {
     messages: [message],
     nextCursor: null,
   });
+
   vi.mocked(repo.addMessage).mockResolvedValue(message);
   vi.mocked(repo.editMessage).mockResolvedValue(message);
 });
@@ -68,18 +69,22 @@ test("dispatches all thread operations with trusted identity", async () => {
     statusCode: 201,
     body: thread,
   });
+
   expect(repo.createThread).toHaveBeenCalledWith("trusted-sub", undefined);
   expect(await route("GET", "/threads")).toEqual({
     statusCode: 200,
     body: { threads: [thread] },
   });
+
   expect(await route("GET", `/threads/${id}`)).toEqual({
     statusCode: 200,
     body: thread,
   });
+
   expect(
     await route("PATCH", `/threads/${id}`, { title: " Renamed " }),
   ).toEqual({ statusCode: 200, body: thread });
+
   expect(repo.renameThread).toHaveBeenCalledWith("trusted-sub", id, "Renamed");
   expect(await route("DELETE", `/threads/${id}`)).toEqual({ statusCode: 204 });
   expect(repo.deleteThread).toHaveBeenCalledWith("trusted-sub", id);
@@ -90,12 +95,14 @@ test("dispatches message operations and forwards pagination", async () => {
     (await route("POST", `/threads/${id}/messages`, { content: " Hello " }))
       .statusCode,
   ).toBe(201);
+
   expect(repo.addMessage).toHaveBeenCalledWith(
     "trusted-sub",
     id,
     "user",
     "Hello",
   );
+
   expect(
     (
       await route("GET", `/threads/${id}/messages`, undefined, {
@@ -103,6 +110,7 @@ test("dispatches message operations and forwards pagination", async () => {
       })
     ).body,
   ).toEqual({ messages: [message], nextCursor: null });
+
   expect(repo.listMessages).toHaveBeenCalledWith("trusted-sub", id, "cursor");
   expect(
     (
@@ -111,12 +119,14 @@ test("dispatches message operations and forwards pagination", async () => {
       })
     ).statusCode,
   ).toBe(200);
+
   expect(repo.editMessage).toHaveBeenCalledWith(
     "trusted-sub",
     id,
     mid,
     "Edited",
   );
+
   expect(await route("DELETE", `/threads/${id}/messages/${mid}`)).toEqual({
     statusCode: 204,
   });
@@ -156,6 +166,7 @@ test("returns 404 for absent or other-user resources and 500 for database errors
     (await route("PATCH", `/threads/${id}/messages/${mid}`, { content: "Hi" }))
       .statusCode,
   ).toBe(404);
+
   vi.mocked(repo.listThreads).mockRejectedValueOnce(new Error("Database down"));
   expect((await route("GET", "/threads")).statusCode).toBe(500);
 });
