@@ -47,6 +47,7 @@ interface ResponseMetadata {
 interface MockStream {
   chunks: string[];
   ended: boolean;
+  metadataWritten?: boolean;
   metadata?: ResponseMetadata;
   write: (chunk: string) => void;
   end: (chunk?: string) => void;
@@ -119,10 +120,22 @@ function createMockStream(): MockStream {
     ended: false,
     metadata: undefined,
     write(chunk: string) {
+      this.metadataWritten = true;
       this.chunks.push(chunk);
     },
     end(chunk?: string) {
-      if (chunk !== undefined) this.chunks.push(chunk);
+      assert.equal(
+        chunk,
+        undefined,
+        "Lambda response payloads must use write(), not end(body)",
+      );
+
+      assert.equal(
+        this.metadataWritten,
+        true,
+        "The first write must emit the HTTP metadata delimiter before end()",
+      );
+
       this.ended = true;
     },
   };

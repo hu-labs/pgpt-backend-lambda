@@ -4,6 +4,10 @@
 #
 # Shared loader for the sourced environment wrappers.
 # Depends on the local-env.mjs script.
+#
+# Usage: _promptgpt_setenv <environment> <target>
+#       environment: preview or production
+#       target: test or public
 
 _promptgpt_setenv() {
     local environment="$1" target="${2:-}" script_dir env_file temp_file key value

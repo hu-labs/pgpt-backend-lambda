@@ -102,9 +102,11 @@ export const handler = awslambda.streamifyResponse(
         headers: { "Content-Type": "application/json" },
       });
 
-      responseStream.end(
+      responseStream.write(
         JSON.stringify({ error: "Missing stage variable: allowedOrigin" }),
       );
+
+      responseStream.end();
 
       return;
     }
@@ -125,7 +127,8 @@ export const handler = awslambda.streamifyResponse(
         headers: { ...headers, "Content-Type": "application/json" },
       });
 
-      responseStream.end(JSON.stringify(errorBody));
+      responseStream.write(JSON.stringify(errorBody));
+      responseStream.end();
     };
 
     const sub = event.requestContext?.authorizer?.claims?.sub;
@@ -141,9 +144,12 @@ export const handler = awslambda.streamifyResponse(
         headers: { ...headers, "Content-Type": "application/json" },
       });
 
-      responseStream.end(
-        response.body === undefined ? undefined : JSON.stringify(response.body),
+      // Even an empty 204 needs a write to emit the integration metadata delimiter.
+      responseStream.write(
+        response.body === undefined ? "" : JSON.stringify(response.body),
       );
+
+      responseStream.end();
 
       return;
     }
