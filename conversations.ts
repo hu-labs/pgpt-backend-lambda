@@ -27,6 +27,14 @@ export interface Message {
   createdAt: string;
 }
 
+export interface Preset {
+  presetId: string;
+  title: string;
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export class NotFoundError extends Error {}
 export class InvalidCursorError extends Error {}
 
@@ -51,6 +59,11 @@ const messageKey = (sub: string, threadId: string, messageId: string) => ({
   SK: `MSG#${threadId}#${messageId}`,
 });
 
+const presetKey = (sub: string, presetId: string) => ({
+  PK: userPK(sub),
+  SK: `PRESET#${presetId}`,
+});
+
 const toThread = (item: Record<string, unknown>): Thread => ({
   threadId: item.threadId as string,
   title: item.title as string,
@@ -64,6 +77,14 @@ const toMessage = (item: Record<string, unknown>): Message => ({
   role: item.role as Message["role"],
   content: item.content as string,
   createdAt: item.createdAt as string,
+});
+
+const toPreset = (item: Record<string, unknown>): Preset => ({
+  presetId: item.presetId as string,
+  title: item.title as string,
+  text: item.text as string,
+  createdAt: item.createdAt as string,
+  updatedAt: item.updatedAt as string,
 });
 
 async function existingUpdate(command: UpdateCommand | DeleteCommand) {
@@ -378,6 +399,105 @@ export async function deleteThread(
     new DeleteCommand({
       TableName: tableName(),
       Key: threadKey(sub, threadId),
+      ConditionExpression: "attribute_exists(PK)",
+    }),
+  );
+}
+
+export async function createPreset(
+  sub: string,
+  title: string,
+  text: string,
+): Promise<Preset> {
+  const now = new Date().toISOString();
+  const preset: Preset = {
+    presetId: randomUUID(),
+    title,
+    text,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await db.send(
+    new PutCommand({
+      TableName: tableName(),
+      Item: { ...presetKey(sub, preset.presetId), ...preset },
+      ConditionExpression: "attribute_not_exists(PK)",
+    }),
+  );
+
+  return preset;
+}
+
+export async function listPresets(sub: string): Promise<Preset[]> {
+  const presets: Preset[] = [];
+  let cursor: Record<string, unknown> | undefined;
+
+  do {
+    const result: QueryCommandOutput = await db.send(
+      new QueryCommand({
+        TableName: tableName(),
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues: { ":pk": userPK(sub), ":prefix": "PRESET#" },
+        ConsistentRead: true,
+        ExclusiveStartKey: cursor,
+      }),
+    );
+
+    presets.push(...(result.Items ?? []).map(toPreset));
+    cursor = result.LastEvaluatedKey;
+  } while (cursor);
+
+  return presets.sort(
+    (a, b) =>
+      b.updatedAt.localeCompare(a.updatedAt) ||
+      a.presetId.localeCompare(b.presetId),
+  );
+}
+
+export async function updatePreset(
+  sub: string,
+  presetId: string,
+  patch: Partial<Pick<Preset, "title" | "text">>,
+): Promise<Preset> {
+  const assignments = ["updatedAt = :now"];
+  const values: Record<string, string> = {
+    ":now": new Date().toISOString(),
+  };
+
+  if (patch.title !== undefined) {
+    assignments.push("title = :title");
+    values[":title"] = patch.title;
+  }
+  if (patch.text !== undefined) {
+    assignments.push("#text = :text");
+    values[":text"] = patch.text;
+  }
+
+  const result = await existingUpdate(
+    new UpdateCommand({
+      TableName: tableName(),
+      Key: presetKey(sub, presetId),
+      UpdateExpression: `SET ${assignments.join(", ")}`,
+      ExpressionAttributeNames:
+        patch.text === undefined ? undefined : { "#text": "text" },
+      ExpressionAttributeValues: values,
+      ConditionExpression: "attribute_exists(PK)",
+      ReturnValues: "ALL_NEW",
+    }),
+  );
+
+  return toPreset(result.Attributes!);
+}
+
+export async function deletePreset(
+  sub: string,
+  presetId: string,
+): Promise<void> {
+  await existingUpdate(
+    new DeleteCommand({
+      TableName: tableName(),
+      Key: presetKey(sub, presetId),
       ConditionExpression: "attribute_exists(PK)",
     }),
   );

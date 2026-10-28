@@ -13,6 +13,10 @@ vi.mock("./conversations.js", async (original) => ({
   addMessage: vi.fn(),
   editMessage: vi.fn(),
   deleteMessage: vi.fn(),
+  createPreset: vi.fn(),
+  listPresets: vi.fn(),
+  updatePreset: vi.fn(),
+  deletePreset: vi.fn(),
 }));
 
 const id = "550e8400-e29b-41d4-a716-446655440000";
@@ -33,6 +37,14 @@ const message = {
   createdAt: "now",
 };
 
+const preset = {
+  presetId: id,
+  title: "Concise",
+  text: "Be concise.",
+  createdAt: "now",
+  updatedAt: "now",
+};
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(repo.createThread).mockResolvedValue(thread);
@@ -46,6 +58,9 @@ beforeEach(() => {
 
   vi.mocked(repo.addMessage).mockResolvedValue(message);
   vi.mocked(repo.editMessage).mockResolvedValue(message);
+  vi.mocked(repo.createPreset).mockResolvedValue(preset);
+  vi.mocked(repo.listPresets).mockResolvedValue([preset]);
+  vi.mocked(repo.updatePreset).mockResolvedValue(preset);
 });
 
 const route = (
@@ -132,6 +147,40 @@ test("dispatches message operations and forwards pagination", async () => {
   });
 });
 
+test("dispatches preset CRUD with the trusted identity", async () => {
+  expect(
+    await route("POST", "/presets", {
+      title: " Concise ",
+      text: " Be concise. ",
+    }),
+  ).toEqual({ statusCode: 201, body: preset });
+
+  expect(repo.createPreset).toHaveBeenCalledWith(
+    "trusted-sub",
+    "Concise",
+    "Be concise.",
+  );
+
+  expect(await route("GET", "/presets")).toEqual({
+    statusCode: 200,
+    body: { presets: [preset] },
+  });
+
+  expect(repo.listPresets).toHaveBeenCalledWith("trusted-sub");
+
+  expect(await route("PATCH", `/presets/${id}`, { title: " Short " })).toEqual({
+    statusCode: 200,
+    body: preset,
+  });
+
+  expect(repo.updatePreset).toHaveBeenCalledWith("trusted-sub", id, {
+    title: "Short",
+  });
+
+  expect(await route("DELETE", `/presets/${id}`)).toEqual({ statusCode: 204 });
+  expect(repo.deletePreset).toHaveBeenCalledWith("trusted-sub", id);
+});
+
 for (const [method, path, body] of [
   ["GET", "/threads/bad", undefined],
   ["POST", "/threads", { title: " " }],
@@ -146,6 +195,12 @@ for (const [method, path, body] of [
     `/threads/${id}/messages/${mid}`,
     { role: "assistant", content: "text" },
   ],
+  ["POST", "/presets", { title: "", text: "Saved" }],
+  ["POST", "/presets", { title: "Saved", text: "" }],
+  ["POST", "/presets", { title: "Saved", text: "Text", sub: "attacker" }],
+  ["PATCH", `/presets/${id}`, {}],
+  ["PATCH", `/presets/${id}`, { title: "", text: "Saved" }],
+  ["PATCH", "/presets/bad", { title: "Saved" }],
 ] as const)
   test(`rejects invalid ${method} ${path} ${(JSON.stringify(body) ?? "undefined").slice(0, 60)}`, async () => {
     expect((await route(method, path, body)).statusCode).toBe(400);
@@ -169,6 +224,9 @@ test("returns 404 for absent or other-user resources and 500 for database errors
 
   vi.mocked(repo.listThreads).mockRejectedValueOnce(new Error("Database down"));
   expect((await route("GET", "/threads")).statusCode).toBe(500);
+
+  vi.mocked(repo.deletePreset).mockRejectedValueOnce(new repo.NotFoundError());
+  expect((await route("DELETE", `/presets/${id}`)).statusCode).toBe(404);
 });
 
 test("distinguishes unknown paths and unsupported methods", async () => {
@@ -178,6 +236,8 @@ test("distinguishes unknown paths and unsupported methods", async () => {
     `/threads/${id}`,
     `/threads/${id}/messages`,
     `/threads/${id}/messages/${mid}`,
+    "/presets",
+    `/presets/${id}`,
   ])
     expect((await route("PUT", path)).statusCode).toBe(405);
 });

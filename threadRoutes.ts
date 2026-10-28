@@ -15,6 +15,7 @@ export interface RouteResponse {
 }
 export const contentSchema = z.string().trim().min(1).max(5000);
 const titleSchema = z.string().trim().min(1).max(100);
+const presetTextSchema = z.string().trim().min(1).max(5000);
 const messageIdSchema = z
   .string()
   .regex(
@@ -47,12 +48,62 @@ export async function dispatchThreadRoute(
 ): Promise<RouteResponse> {
   const path = event.path ?? "";
   const method = event.httpMethod;
+  const presetMatch = /^\/presets(?:\/([^/]+))?$/.exec(path);
   const match = /^\/threads(?:\/([^/]+)(?:\/(messages)(?:\/([^/]+))?)?)?$/.exec(
     path,
   );
 
-  if (!match) return { statusCode: 404, body: { error: "Route not found" } };
   try {
+    if (presetMatch) {
+      const [, rawPresetId] = presetMatch;
+      if (!rawPresetId) {
+        if (method === "GET") {
+          return {
+            statusCode: 200,
+            body: { presets: await conversations.listPresets(sub) },
+          };
+        }
+        if (method === "POST") {
+          const body = z
+            .object({ title: titleSchema, text: presetTextSchema })
+            .strict()
+            .parse(requestBody(event));
+
+          return {
+            statusCode: 201,
+            body: await conversations.createPreset(sub, body.title, body.text),
+          };
+        }
+      } else {
+        const presetId = z.uuid().parse(rawPresetId);
+        if (method === "PATCH") {
+          const body = z
+            .object({
+              title: titleSchema.optional(),
+              text: presetTextSchema.optional(),
+            })
+            .strict()
+            .refine(
+              (value) => value.title !== undefined || value.text !== undefined,
+            )
+            .parse(requestBody(event));
+
+          return {
+            statusCode: 200,
+            body: await conversations.updatePreset(sub, presetId, body),
+          };
+        }
+        if (method === "DELETE") {
+          await conversations.deletePreset(sub, presetId);
+
+          return { statusCode: 204 };
+        }
+      }
+
+      return { statusCode: 405, body: { error: "Method not allowed" } };
+    }
+
+    if (!match) return { statusCode: 404, body: { error: "Route not found" } };
     const [, rawThreadId, messages, rawMessageId] = match;
     if (!rawThreadId) {
       if (method === "GET")

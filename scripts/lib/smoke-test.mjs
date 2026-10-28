@@ -173,7 +173,7 @@ export async function runSmoke({
     return response.json();
   };
 
-  for (const path of ["/chat", "/threads"]) {
+  for (const path of ["/chat", "/threads", "/presets"]) {
     const body = await request("POST", path, 401, undefined, {});
     if (typeof (body.message ?? body.error) !== "string")
       throw new Error("Invalid authentication error response.");
@@ -203,6 +203,7 @@ export async function runSmoke({
   if (secondary && secondary.sub === primary.sub)
     throw new Error("Cross-user tests require two different Cognito users.");
   const resources = [];
+  const presetResources = [];
   const create = async (token) => {
     const thread = await request("POST", "/threads", 201, token, {
       title: "Local smoke test",
@@ -313,6 +314,36 @@ export async function runSmoke({
 
     log("Thread and message CRUD passed.");
 
+    const preset = await request("POST", "/presets", 201, token, {
+      title: "Smoke preset",
+      text: "Temporary reusable prompt",
+    });
+
+    check(
+      /^[0-9a-f-]{36}$/i.test(preset.presetId ?? ""),
+      "Create preset returned no valid ID.",
+    );
+
+    presetResources.push({ id: preset.presetId, token });
+    check(
+      (await request("GET", "/presets", 200, token)).presets.some(
+        (item) => item.presetId === preset.presetId,
+      ),
+      "Created preset is missing from the preset list.",
+    );
+
+    check(
+      (
+        await request("PATCH", `/presets/${preset.presetId}`, 200, token, {
+          title: "Renamed smoke preset",
+          text: "Updated reusable prompt",
+        })
+      ).text === "Updated reusable prompt",
+      "Preset update failed.",
+    );
+
+    log("Preset CRUD passed.");
+
     const prompt = "Reply with a short greeting.";
     const streamed = await readChatStream(
       await request(
@@ -365,6 +396,13 @@ export async function runSmoke({
         "Primary account can list the second thread.",
       );
 
+      check(
+        !(await request("GET", "/presets", 200, other)).presets.some(
+          (item) => item.presetId === preset.presetId,
+        ),
+        "Second account can list the primary preset.",
+      );
+
       for (const [method, route, body] of [
         ["GET", path],
         ["PATCH", path, { title: "Forbidden" }],
@@ -378,6 +416,8 @@ export async function runSmoke({
         ],
         ["DELETE", `${path}/messages/${streamed.userMessageId}`],
         ["POST", "/chat", { threadId: thread.threadId, content: "Forbidden" }],
+        ["PATCH", `/presets/${preset.presetId}`, { title: "Forbidden" }],
+        ["DELETE", `/presets/${preset.presetId}`],
       ])
         await request(method, route, 404, other, body);
       await request("GET", `/threads/${secondThread.threadId}`, 404, token);
@@ -398,6 +438,24 @@ export async function runSmoke({
   } catch (error) {
     failure = error;
   } finally {
+    for (const resource of presetResources) {
+      try {
+        await request(
+          "DELETE",
+          `/presets/${resource.id}`,
+          204,
+          resource.token,
+          undefined,
+          { cleanup: true },
+        );
+      } catch {
+        log(
+          `Cleanup failed for temporary preset ${resource.id}; remove it manually.`,
+        );
+
+        failure ??= new Error("Temporary preset cleanup failed.");
+      }
+    }
     for (const resource of resources) {
       try {
         await request(
