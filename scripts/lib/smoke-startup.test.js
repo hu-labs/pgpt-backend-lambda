@@ -33,7 +33,11 @@ test("CI smoke entry point runs without Cognito modules or installed dependencie
           status: 401, headers: {"Content-Type": "application/json"}
         });
       };
-      process.on("beforeExit", () => assert.deepEqual(paths, ["/api/v1/chat", "/api/v1/threads"]));
+      process.on("beforeExit", () => assert.deepEqual(paths, [
+        "/api/v1/chat",
+        "/api/v1/threads",
+        "/api/v1/presets",
+      ]));
     `,
     );
 

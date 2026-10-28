@@ -30,6 +30,16 @@ const message = {
   createdAt: "now",
 };
 
+const preset = {
+  PK: "USER#a",
+  SK: `PRESET#${id}`,
+  presetId: id,
+  title: "Concise",
+  text: "Be concise.",
+  createdAt: "2026-10-24T16:00:00.000Z",
+  updatedAt: "2026-10-24T16:00:00.000Z",
+};
+
 const conditional = () =>
   Object.assign(new Error("Missing"), {
     name: "ConditionalCheckFailedException",
@@ -315,6 +325,79 @@ test("failed message deletion keeps metadata for a retry", async () => {
       ([c]) => c instanceof DeleteCommand && c.input.Key?.SK === thread.SK,
     ),
   ).toBe(false);
+});
+
+test("creates a user-owned preset without exposing storage keys", async () => {
+  send.mockResolvedValueOnce({} as never);
+
+  const result = await repo.createPreset("a", "Concise", "Be concise.");
+  expect(result.presetId).toMatch(/^[0-9a-f-]{36}$/);
+  expect(result.createdAt).toBe(result.updatedAt);
+  expect(result).not.toHaveProperty("PK");
+  expect((send.mock.calls[0][0] as PutCommand).input).toMatchObject({
+    Item: {
+      PK: "USER#a",
+      SK: `PRESET#${result.presetId}`,
+      title: "Concise",
+      text: "Be concise.",
+    },
+    ConditionExpression: "attribute_not_exists(PK)",
+  });
+});
+
+test("queries every preset page and sorts the public results", async () => {
+  const cursor = { PK: "USER#a", SK: "PRESET#page" };
+  send
+    .mockResolvedValueOnce({
+      Items: [preset],
+      LastEvaluatedKey: cursor,
+    } as never)
+    .mockResolvedValueOnce({
+      Items: [{ ...preset, presetId: "new", updatedAt: "2026-10-25" }],
+    } as never);
+
+  const result = await repo.listPresets("a");
+  expect(result.map((item) => item.presetId)).toEqual(["new", id]);
+  expect(result[0]).not.toHaveProperty("SK");
+  expect((send.mock.calls[0][0] as QueryCommand).input).toMatchObject({
+    ExpressionAttributeValues: {
+      ":pk": "USER#a",
+      ":prefix": "PRESET#",
+    },
+    ConsistentRead: true,
+  });
+
+  expect(
+    (send.mock.calls[1][0] as QueryCommand).input.ExclusiveStartKey,
+  ).toEqual(cursor);
+});
+
+test("updates and deletes only presets in the caller partition", async () => {
+  send.mockResolvedValueOnce({
+    Attributes: { ...preset, title: "Short", text: "Keep it short." },
+  } as never);
+
+  const updated = await repo.updatePreset("a", id, {
+    title: "Short",
+    text: "Keep it short.",
+  });
+
+  expect(updated).toMatchObject({ title: "Short", text: "Keep it short." });
+  expect((send.mock.calls[0][0] as UpdateCommand).input).toMatchObject({
+    Key: { PK: "USER#a", SK: `PRESET#${id}` },
+    ConditionExpression: "attribute_exists(PK)",
+    ReturnValues: "ALL_NEW",
+  });
+
+  send.mockRejectedValueOnce(conditional());
+  await expect(repo.deletePreset("b", id)).rejects.toBeInstanceOf(
+    repo.NotFoundError,
+  );
+
+  expect((send.mock.calls[1][0] as DeleteCommand).input.Key).toEqual({
+    PK: "USER#b",
+    SK: `PRESET#${id}`,
+  });
 });
 
 test("missing configuration and unexpected errors fail rather than returning success", async () => {

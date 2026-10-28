@@ -49,6 +49,7 @@ function fixture({
   wrongIsolationStatus = false,
 } = {}) {
   const threads = new Map();
+  const presets = new Map();
   const calls = [];
   const fetchImpl = vi.fn(async (url, options) => {
     const u = new URL(url);
@@ -61,6 +62,43 @@ function fixture({
     const match = /^\/threads\/([^/]+)(?:\/messages(?:\/([^/]+))?)?$/.exec(
       path,
     );
+
+    const presetMatch = /^\/presets(?:\/([^/]+))?$/.exec(path);
+
+    if (presetMatch) {
+      if (!presetMatch[1]) {
+        if (method === "POST") {
+          const preset = {
+            presetId: randomUUID(),
+            title: body.title,
+            text: body.text,
+            owner: token,
+          };
+
+          presets.set(preset.presetId, preset);
+
+          return json(preset, 201);
+        }
+
+        return json({
+          presets: [...presets.values()].filter(
+            (preset) => leak || preset.owner === token,
+          ),
+        });
+      }
+
+      const preset = presets.get(presetMatch[1]);
+      if (!preset || preset.owner !== token)
+        return json({ error: "Not found" }, 404);
+      if (method === "PATCH") {
+        Object.assign(preset, body);
+
+        return json(preset);
+      }
+      presets.delete(preset.presetId);
+
+      return new Response(null, { status: 204 });
+    }
 
     if (path === "/threads") {
       if (method === "POST") {
@@ -157,10 +195,10 @@ function fixture({
     });
   });
 
-  return { fetchImpl, threads, calls };
+  return { fetchImpl, threads, presets, calls };
 }
 
-test("CI mode checks both unauthenticated routes without invoking login", async () => {
+test("CI mode checks all unauthenticated routes without invoking login", async () => {
   const f = fixture(),
     auth = vi.fn();
 
@@ -172,7 +210,7 @@ test("CI mode checks both unauthenticated routes without invoking login", async 
   });
 
   expect(auth).not.toHaveBeenCalled();
-  expect(f.calls.map((c) => c.path)).toEqual(["/chat", "/threads"]);
+  expect(f.calls.map((c) => c.path)).toEqual(["/chat", "/threads", "/presets"]);
   expect(f.calls.every((c) => c.headers["X-Api-Key"] === "api-secret")).toBe(
     true,
   );
@@ -191,6 +229,7 @@ test("authenticated mode verifies CRUD, paginated persisted SSE, both users and 
   });
 
   expect(f.threads.size).toBe(0);
+  expect(f.presets.size).toBe(0);
   expect(f.calls.some((c) => c.path === "/chat" && c.token === "token-b")).toBe(
     true,
   );
@@ -313,7 +352,7 @@ test("login failure creates no threads", async () => {
     }),
   ).rejects.toThrow("Login failed");
 
-  expect(f.calls).toHaveLength(2);
+  expect(f.calls).toHaveLength(3);
 });
 
 test("rejects wrong boundary statuses and HTML error substitutions", async () => {
